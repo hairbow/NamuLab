@@ -3468,6 +3468,7 @@ function renderAll() {
     main.firstElementChild.animate([{opacity:.7,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:180,easing:'ease-out'});
   }
   lastPaintedTab = APP_STATE.activeTab;
+  queueNamuSpeechPreload();
   renderNav();
   renderModal();
 }
@@ -3795,258 +3796,337 @@ function completeLesson() {
   APP_STATE.flipped=false;renderAll();
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
-function speak(text, lang) {
-  // NamuLab audio: anonymous MP3 services + a persistent cache of successfully
-  // generated recordings. No Cloudflare Worker, Google Translate or StreamElements.
-  const phrase = String(text == null ? '' : text).trim();
-  if (!phrase) return;
-  const locale = String(lang).toLowerCase().startsWith('ko') ? 'ko' : 'en';
-  const token = (window.namuTtsToken || 0) + 1;
-  window.namuTtsToken = token;
+// NamuLab speech acceleration. All UI/Supabase logic remains unchanged.
+// First prepare the visible term quietly, then play cached audio on a tap.
+// The direct audio stream and MP3 generation are NOT tried serially.
+const NAMU_SPEECH = (() => {
+  const audioBase = 'https://freeapi.pro/api';
+  const blobs = new Map();
+  const audioLinks = new Map();
+  const pending = new Map();
+  const warm = new Map();
+  const MAX_BLOBS = 12;
+  let voicesRequest = null;
+  let preloadedTerm = '';
+  let playbackId = 0;
+  let activeAudio = null;
+  let activeURL = null;
+  let activeTimeout = null;
+  let activeAbort = null;
 
-  if (typeof window.namuTtsCancel === 'function') {
-    try { window.namuTtsCancel(); } catch (_) {}
-  }
-  if (window.currentAudio) {
-    try { window.currentAudio.pause(); window.currentAudio.currentTime = 0; } catch (_) {}
-    window.currentAudio = null;
-  }
-  if ('speechSynthesis' in window) {
-    try { window.speechSynthesis.cancel(); } catch (_) {}
-  }
+  const normalize = (text,lang) => ({
+    text: String(text == null ? '' : text).trim(),
+    lang: String(lang).toLowerCase().startsWith('ko') ? 'ko' : 'en'
+  });
+  const cacheKey = (text,lang) => lang + '|' + text;
+  const directURL = (text,lang) => audioBase + '/tts?text=' +
+    encodeURIComponent(text) + '&voice=' + (lang === 'ko' ? 'ko-KR' : 'en-US');
 
-  let stopped = false;
-  let playing = false;
-  let audio = null;
-  let timer = null;
-  let controller = null;
-  let blobURL = null;
-  const live = () => !stopped && token === window.namuTtsToken;
-  const clearTimer = () => {
-    if (timer !== null) { clearTimeout(timer); timer = null; }
-  };
-  const cleanup = () => {
-    clearTimer();
-    if (controller) { try { controller.abort(); } catch (_) {} controller = null; }
-    if (audio) {
-      audio.onplaying = audio.onerror = audio.onended = null;
-      try { audio.pause(); } catch (_) {}
-      audio = null;
-    }
-    if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
-  };
-  window.namuTtsCancel = () => {
-    stopped = true;
-    cleanup();
-    if ('speechSynthesis' in window) {
-      try { window.speechSynthesis.cancel(); } catch (_) {}
-    }
-  };
-
-  function recordToCache(blob) {
-    // An unavailable/blocked IndexedDB must never stop playback.
-    if (!blob || blob.size < 200 || !('indexedDB' in window)) return;
-    try {
-      const open = indexedDB.open('NamuLabAudioV1', 1);
-      open.onupgradeneeded = () => {
-        if (!open.result.objectStoreNames.contains('clips')) open.result.createObjectStore('clips');
-      };
-      open.onsuccess = () => {
-        try {
-          const db = open.result;
-          const tx = db.transaction('clips', 'readwrite');
-          tx.objectStore('clips').put(blob, locale + '|' + phrase);
-          tx.oncomplete = tx.onerror = () => db.close();
-        } catch (_) { try { open.result.close(); } catch (__) {} }
-      };
-    } catch (_) {}
+  function keepBlob(key,blob) {
+    if (!(blob instanceof Blob) || blob.size < 300) return;
+    blobs.delete(key);
+    blobs.set(key,blob);
+    while (blobs.size > MAX_BLOBS) blobs.delete(blobs.keys().next().value);
   }
-  function readFromCache() {
+  function dbOpen() {
     return new Promise(resolve => {
       if (!('indexedDB' in window)) return resolve(null);
       try {
-        const open = indexedDB.open('NamuLabAudioV1', 1);
-        open.onupgradeneeded = () => {
-          if (!open.result.objectStoreNames.contains('clips')) open.result.createObjectStore('clips');
+        const request=indexedDB.open('NamuLabAudioV1',1);
+        let done=false;
+        const timer=setTimeout(()=>{if(!done){done=true;resolve(null);}},1200);
+        const finish=db=>{if(!done){done=true;clearTimeout(timer);resolve(db);}else if(db){try{db.close();}catch(_){}}};
+        request.onupgradeneeded=()=>{
+          if(!request.result.objectStoreNames.contains('clips')) request.result.createObjectStore('clips');
         };
-        open.onerror = () => resolve(null);
-        open.onsuccess = () => {
-          try {
-            const db = open.result;
-            const tx = db.transaction('clips', 'readonly');
-            const get = tx.objectStore('clips').get(locale + '|' + phrase);
-            get.onsuccess = () => resolve(get.result instanceof Blob ? get.result : null);
-            get.onerror = () => resolve(null);
-            tx.oncomplete = tx.onerror = () => db.close();
-          } catch (_) { resolve(null); }
-        };
-      } catch (_) { resolve(null); }
+        request.onerror=()=>finish(null);
+        request.onsuccess=()=>finish(request.result);
+      } catch (_) {resolve(null);}
     });
   }
-  function playURL(url, milliseconds, onSuccess) {
-    return new Promise((resolve) => {
-      if (!live()) return resolve(false);
-      clearTimer();
-      if (audio) {
-        audio.onplaying = audio.onerror = audio.onended = null;
-        try { audio.pause(); } catch (_) {}
-      }
-      const el = new Audio();
-      audio = el;
-      window.currentAudio = el;
-      el.preload = 'auto';
-      let completed = false;
-      const finish = okay => {
-        if (completed) return;
-        completed = true;
-        clearTimer();
-        el.onerror = null;
-        if (!okay) { el.onplaying = null; try { el.pause(); } catch (_) {} }
-        if (live() && okay) {
-          playing = true;
-          if (typeof onSuccess === 'function') try { onSuccess(); } catch (_) {}
-        }
-        resolve(Boolean(okay && live()));
-      };
-      el.onplaying = () => finish(true);
-      el.onerror = () => finish(false);
-      el.onended = () => {
-        if (window.currentAudio === el) window.currentAudio = null;
-      };
-      timer = setTimeout(() => finish(false), milliseconds);
+  async function readBlob(key) {
+    if (blobs.has(key)) return blobs.get(key);
+    const db=await dbOpen();
+    if(!db) return null;
+    return new Promise(resolve=>{
       try {
-        el.src = url;
-        const promise = el.play();
-        if (promise && typeof promise.catch === 'function') promise.catch(() => finish(false));
-      } catch (_) { finish(false); }
+        const tx=db.transaction('clips','readonly');
+        const get=tx.objectStore('clips').get(key);
+        get.onsuccess=()=>{
+          const blob=get.result instanceof Blob?get.result:null;
+          if(blob)keepBlob(key,blob);
+          resolve(blob);
+        };
+        get.onerror=()=>resolve(null);
+        tx.oncomplete=tx.onerror=()=>db.close();
+      } catch (_) {try{db.close();}catch(__){}resolve(null);}
     });
   }
-  async function requestJSON(url, options, milliseconds) {
-    if (!live()) throw Error('cancelled');
-    controller = new AbortController();
-    const current = controller;
-    const abortAfter = setTimeout(() => current.abort(), milliseconds);
+  async function saveBlob(key,blob) {
+    keepBlob(key,blob);
+    const db=await dbOpen();
+    if(!db) return;
     try {
-      const response = await fetch(url, { ...options, signal: current.signal });
-      if (!response.ok) throw Error('TTS HTTP ' + response.status);
-      return await response.json();
-    } finally {
-      clearTimeout(abortAfter);
-      if (controller === current) controller = null;
-    }
+      const tx=db.transaction('clips','readwrite');
+      tx.objectStore('clips').put(blob,key);
+      tx.oncomplete=tx.onerror=()=>db.close();
+    } catch (_) {try{db.close();}catch(__){}}
   }
-  async function requestAudioBlob(url, options, milliseconds) {
-    if (!live()) throw Error('cancelled');
-    controller = new AbortController();
-    const current = controller;
-    const abortAfter = setTimeout(() => current.abort(), milliseconds);
-    try {
-      const response = await fetch(url, { ...options, signal: current.signal });
-      if (!response.ok) throw Error('TTS HTTP ' + response.status);
-      const blob = await response.blob();
-      if (!blob || blob.size < 200 || (blob.type && !/audio|octet-stream/.test(blob.type))) {
-        throw Error('TTS returned no audio');
-      }
-      return blob;
-    } finally {
-      clearTimeout(abortAfter);
-      if (controller === current) controller = null;
-    }
-  }
-  async function playBlob(blob) {
-    if (!live()) return false;
-    blobURL = URL.createObjectURL(blob);
-    const ok = await playURL(blobURL, 6000);
-    if (!ok && blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
-    return ok;
-  }
-  async function tryFreeApiPost() {
-    // FreeAPI also documents a JSON POST that returns MP3 bytes.
-    const voices = await requestJSON('https://freeapi.pro/api/voices', {}, 5000);
-    const collection = Array.isArray(voices.voices) ? voices.voices : [];
-    const prefix = locale === 'ko' ? 'ko-KR-' : 'en-US-';
-    const matching = collection.find(v => String(v.edgeVoice || '').startsWith(prefix));
-    if (!matching) throw Error('No matching cloud voice');
-    const blob = await requestAudioBlob('https://freeapi.pro/api/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ voiceIndex: matching.index, text: phrase, rate: -8, pitch: 0 })
-    }, 11000);
-    const ok = await playBlob(blob);
-    if (ok) recordToCache(blob);
-    return ok;
-  }
-  async function tryTtsAi() {
-    // TTS.ai documents an anonymous free tier and dynamically lists KO/EN voices.
-    const result = await requestJSON('https://api.tts.ai/v1/voices/?language=' + locale, {}, 7000);
-    const voices = Array.isArray(result.voices) ? result.voices : [];
-    const matching = voices.find(v => /^(kokoro|melotts|vits|piper)$/i.test(v.model || '') &&
-      String(v.language || '').toLowerCase().startsWith(locale));
-    if (!matching) throw Error('No available voice');
-    const resultPost = await requestJSON('https://api.tts.ai/v1/tts/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: matching.model, voice: matching.id,
-        text: phrase, language: locale, format: 'mp3', speed: 0.94 })
-    }, 10000);
-    const uuid = resultPost.uuid || resultPost.job_id;
-    if (!uuid) throw Error('No TTS job ID');
-    const end = Date.now() + 15000;
-    while (live() && Date.now() < end) {
-      await new Promise(resolve => setTimeout(resolve, 1050));
-      if (!live()) return false;
-      const progress = await requestJSON('https://api.tts.ai/v1/speech/results/?uuid=' +
-        encodeURIComponent(uuid), {}, 6500);
-      if (progress.status === 'failed') return false;
-      if (progress.status === 'completed' && progress.result_url) {
+  async function getVoices() {
+    if (!voicesRequest) {
+      voicesRequest = (async()=>{
+        const controller=new AbortController();
+        const timer=setTimeout(()=>controller.abort(),3500);
         try {
-          const blob = await requestAudioBlob(progress.result_url, {}, 8000);
-          const ok = await playBlob(blob);
-          if (ok) recordToCache(blob);
-          return ok;
-        } catch (_) {
-          return await playURL(progress.result_url, 7000);
+          const response=await fetch(audioBase+'/voices',{signal:controller.signal});
+          if(!response.ok) throw Error('Voices HTTP '+response.status);
+          const data=await response.json();
+          if(!Array.isArray(data.voices))throw Error('Voice list missing');
+          return data.voices;
+        } finally {clearTimeout(timer);}
+      })().catch(()=>{voicesRequest=null;return null;});
+    }
+    return voicesRequest;
+  }
+  async function generate(text,lang) {
+    const voices=await getVoices();
+    if(!voices)return null;
+    const prefix=lang==='ko'?'ko-KR-':'en-US-';
+    const preferred=lang==='ko'?'SunHiNeural':'JennyNeural';
+    const matching=voices.find(v=>String(v.edgeVoice||'').startsWith(prefix)&&
+      String(v.edgeVoice||'').includes(preferred))||
+      voices.find(v=>String(v.edgeVoice||'').startsWith(prefix));
+    if(!matching)return null;
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),8500);
+    try {
+      const response=await fetch(audioBase+'/tts',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({voiceIndex:matching.index,text,rate:-5,pitch:0}),
+        signal:controller.signal
+      });
+      if(!response.ok)throw Error('TTS HTTP '+response.status);
+      const blob=await response.blob();
+      if(blob.size<300||(blob.type&&!/audio|octet-stream/i.test(blob.type)))return null;
+      return blob;
+    }catch(error){
+      console.debug('NamuLab TTS online generator:',error.message);
+      return null;
+    }finally{clearTimeout(timer);}
+  }
+  // Keep the previously working TTS.ai path as the LAST online fallback.
+  // It is deliberately not used for background preloading (it can queue jobs).
+  async function generateTtsAi(text,lang,alive) {
+    async function json(url,options={},timeout=5500) {
+      const ctrl=new AbortController();
+      const timer=setTimeout(()=>ctrl.abort(),timeout);
+      try {
+        const res=await fetch(url,{...options,signal:ctrl.signal});
+        if(!res.ok)throw Error('TTS.ai HTTP '+res.status);
+        return await res.json();
+      } finally {clearTimeout(timer);}
+    }
+    try {
+      const voiceData=await json('https://api.tts.ai/v1/voices/?language='+lang);
+      const items=Array.isArray(voiceData.voices)?voiceData.voices:[];
+      const voice=items.find(v=>/^(kokoro|melotts|vits|piper)$/i.test(v.model||'')&&
+        String(v.language||'').toLowerCase().startsWith(lang));
+      if(!voice||!alive())return null;
+      const job=await json('https://api.tts.ai/v1/tts/',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({model:voice.model,voice:voice.id,text,language:lang,
+          format:'mp3',speed:0.94})
+      },8000);
+      const uuid=job.uuid||job.job_id;
+      if(!uuid)return null;
+      const deadline=Date.now()+13000;
+      while(alive()&&Date.now()<deadline){
+        await new Promise(resolve=>setTimeout(resolve,950));
+        if(!alive())return null;
+        const result=await json('https://api.tts.ai/v1/speech/results/?uuid='+
+          encodeURIComponent(uuid),{},4500);
+        if(result.status==='failed')return null;
+        if(result.status==='completed'&&result.result_url){
+          const ctrl=new AbortController();
+          const timer=setTimeout(()=>ctrl.abort(),6500);
+          try {
+            const response=await fetch(result.result_url,{signal:ctrl.signal});
+            if(!response.ok)return {url:result.result_url};
+            const blob=await response.blob();
+            return blob.size>=300?blob:{url:result.result_url};
+          }catch(_){
+            // Audio.src does not require CORS; preserve this working fallback.
+            return {url:result.result_url};
+          }finally{clearTimeout(timer);}
         }
       }
-    }
-    return false;
+    }catch(error){console.debug('NamuLab TTS.ai:',error.message);}
+    return null;
   }
-  function finalBrowserFallback() {
-    if (!live() || playing) return;
-    try {
-      if (typeof SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) return;
-      const utterance = new SpeechSynthesisUtterance(phrase);
-      utterance.lang = locale === 'ko' ? 'ko-KR' : 'en-US';
-      utterance.rate = 0.91;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utterance);
-    } catch (_) {}
+  function prepare(text,lang) {
+    const item=normalize(text,lang);
+    if(!item.text)return Promise.resolve(null);
+    const key=cacheKey(item.text,item.lang);
+    if(blobs.has(key))return Promise.resolve(blobs.get(key));
+    if(audioLinks.has(key))return Promise.resolve({url:audioLinks.get(key)});
+    if(pending.has(key))return pending.get(key);
+    const task=(async()=>{
+      const cached=await readBlob(key);
+      if(cached)return cached;
+      // While the learner reads the visible card, also queue the last online
+      // backup if FreeAPI cannot generate that language. Cache the result.
+      let created=await generate(item.text,item.lang);
+      if(!created)created=await generateTtsAi(item.text,item.lang,()=>true);
+      if(created instanceof Blob)void saveBlob(key,created);
+      else if(created && created.url){
+        audioLinks.set(key,created.url);
+        while(audioLinks.size>12)audioLinks.delete(audioLinks.keys().next().value);
+      }
+      return created;
+    })().catch(()=>null).finally(()=>pending.delete(key));
+    pending.set(key,task);
+    return task;
   }
-
-  (async () => {
+  function warmDirect(text,lang) {
+    const key=cacheKey(text,lang);
+    if(warm.has(key))return;
     try {
-      const cached = await readFromCache();
-      if (!live()) return;
-      if (cached && await playBlob(cached)) return;
-      if (!live()) return;
-
-      // FreeAPI advertises a direct GET URL; no CORS is needed for an Audio element.
-      // If unavailable, try its documented POST and TTS.ai's anonymous service.
-      const voice = locale === 'ko' ? 'ko-KR' : 'en-US';
-      const direct = 'https://freeapi.pro/api/tts?text=' + encodeURIComponent(phrase) +
-        '&voice=' + encodeURIComponent(voice);
-      if (await playURL(direct, 5200)) return;
-      if (!live()) return;
-      try { if (await tryFreeApiPost()) return; }
-      catch (error) { console.debug('NamuLab TTS FreeAPI:', error.message); }
-      if (!live()) return;
-      try { if (await tryTtsAi()) return; }
-      catch (error) { console.debug('NamuLab TTS TTS.ai:', error.message); }
-      finalBrowserFallback();
-    } catch (error) {
-      if (live()) { console.debug('NamuLab TTS:', error.message); finalBrowserFallback(); }
+      const a=new Audio();
+      a.preload='auto';
+      a.src=directURL(text,lang);
+      // On mobile, preload is a hint and may be ignored until user interaction.
+      a.load();
+      warm.set(key,a);
+      while(warm.size>6){
+        const entry=warm.entries().next().value;
+        if(!entry)break;
+        warm.delete(entry[0]);
+        const old=entry[1];
+        if(old!==activeAudio){try{old.pause();old.removeAttribute('src');old.load();}catch(_){}}
+      }
+    }catch(_){}
+  }
+  function prewarm() {
+    if (APP_STATE.activeTab!=='cards'||APP_STATE.examMode!=='cards'||APP_STATE.modalMode)return;
+    const term=getCurrentTerm();
+    if(!term)return;
+    const marker=term.id;
+    if(marker===preloadedTerm)return;
+    preloadedTerm=marker;
+    // Only two short phrases for the visible term, not the whole 60-card database.
+    for(const lang of ['en','ko']){
+      const text=term[lang];
+      warmDirect(text,lang);
+      void prepare(text,lang);
     }
-  })();
+  }
+  function stop() {
+    playbackId++;
+    if(activeTimeout){clearTimeout(activeTimeout);activeTimeout=null;}
+    if(activeAudio){
+      activeAudio.onplaying=activeAudio.onerror=activeAudio.onended=null;
+      try{activeAudio.pause();activeAudio.currentTime=0;}catch(_){}
+    }
+    if(activeURL){URL.revokeObjectURL(activeURL);activeURL=null;}
+    activeAudio=null;
+    window.currentAudio=null;
+    if(activeAbort){try{activeAbort.abort();}catch(_){}activeAbort=null;}
+    try{window.speechSynthesis?.cancel();}catch(_){}
+  }
+  async function play(text,lang) {
+    const phrase=normalize(text,lang);
+    if(!phrase.text)return;
+    stop();
+    const id=playbackId;
+    const key=cacheKey(phrase.text,phrase.lang);
+    const alive=()=>id===playbackId;
+    let began=false;
+    let resolved=false;
+    let resolveDirect;
+    const directResult=new Promise(resolve=>{resolveDirect=resolve;});
+    let a=warm.get(key);
+    warm.delete(key);
+    if(!a)a=new Audio();
+    activeAudio=a;
+    window.currentAudio=a;
+    a.preload='auto';
+
+    function completeDirect(ok) {
+      if(resolved)return;
+      resolved=true;
+      resolveDirect(ok);
+    }
+    function started() {
+      if(!alive())return;
+      began=true;
+      if(activeTimeout){clearTimeout(activeTimeout);activeTimeout=null;}
+      completeDirect(true);
+    }
+    function failed() {completeDirect(false);}
+    function browserFallback() {
+      if(!alive()||began)return;
+      try{
+        if(!window.speechSynthesis||typeof SpeechSynthesisUtterance==='undefined')return;
+        const u=new SpeechSynthesisUtterance(phrase.text);
+        u.lang=phrase.lang==='ko'?'ko-KR':'en-US';u.rate=0.92;
+        window.speechSynthesis.cancel();window.speechSynthesis.speak(u);
+      }catch(_){}
+    }
+    async function changeToPrepared(source) {
+      if(!alive()||began||!source)return false;
+      if(activeURL){URL.revokeObjectURL(activeURL);activeURL=null;}
+      const src=source instanceof Blob ? URL.createObjectURL(source) : source.url;
+      if(!src)return false;
+      if(source instanceof Blob)activeURL=src;
+      a.pause();
+      a.src=src;
+      a.load();
+      try{
+        await a.play();
+        if(alive()){began=true;completeDirect(true);return true;}
+      }catch(_){/* Direct stream is the other option. */}
+      return false;
+    }
+
+    // A cached MP3 is fastest and will replay without hitting the network.
+    if(blobs.has(key)){
+      a.onplaying=started;
+      a.onerror=failed;
+      if(await changeToPrepared(blobs.get(key)))return;
+    }
+    if(!alive())return;
+
+    // This stream begins during the user's click: important for Telegram WebView.
+    a.onplaying=started;
+    a.onerror=failed;
+    a.onended=()=>{if(window.currentAudio===a)window.currentAudio=null;};
+    if(!a.src||!a.src.includes('/api/tts?'))a.src=directURL(phrase.text,phrase.lang);
+    // Don't cancel a slow but working stream just because the other source is loading.
+    activeTimeout=setTimeout(()=>{if(alive()&&!began)completeDirect(false);},6500);
+    try{const p=a.play();if(p&&typeof p.catch==='function')p.catch(failed);}catch(_){failed();}
+
+    // POST synthesis runs IN PARALLEL with the direct streaming URL, not after it.
+    const generated=prepare(phrase.text,phrase.lang);
+    const generationResult=generated.then(async blob=>{
+      if(!alive()||began||!blob)return false;
+      return changeToPrepared(blob);
+    }).catch(()=>false);
+    await Promise.allSettled([directResult,generationResult]);
+    if(!alive()||began)return;
+    // prepare() has already tried FreeAPI and TTS.ai in the background.
+    // Avoid late online audio overlapping the system voice.
+    try{a.pause();}catch(_){}
+    browserFallback();
+  }
+  return {play,prewarm,stop};
+})();
+function queueNamuSpeechPreload(){
+  // Scheduling avoids any additional DOM writes during renderAll().
+  try{NAMU_SPEECH.prewarm();}catch(_){}
+}
+function speak(text,lang){
+  void NAMU_SPEECH.play(text,lang);
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
