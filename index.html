@@ -81,6 +81,8 @@
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;600;700&display=swap');
     :root { color-scheme: dark; --bg:#061713; --panel:#0b2620; --mint:#bcff7e; --text:#f2fff6; --muted:#8aa99f; }
     * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html { overflow-y:scroll; overflow-x:clip; scrollbar-gutter:stable; }
+    body { overflow-x:clip; }
     body { margin:0; min-height:100vh; background:radial-gradient(ellipse at 50% -20%,#18483d 0%,#081e19 38%,#03100e 75%); color:var(--text); font-family:'DM Sans','Noto Sans KR',sans-serif; }
     button, input { font:inherit; }
     button { cursor:pointer; }
@@ -222,7 +224,7 @@
     .exam-choice.incorrect { border-color:#ffaba0; background:#fa7b7120; color:#ffd0c8; }
     .exam-letter { flex:none; width:25px; height:25px; display:grid; place-items:center; border-radius:8px; background:#ffffff10; color:#c3e4c6; font-size:11px; font-weight:800; }
     .exam-question { font-size:21px; line-height:1.4; font-weight:800; overflow-wrap:anywhere; }
-    .tab-content { animation:tab-enter .18s ease-out; min-width:0; }
+    .tab-content { min-width:0; }
     @keyframes tab-enter { from{opacity:.7;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
     .stat-pill { min-width:0; }
     .top-header-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -3028,8 +3030,19 @@ function icon(name, size=20) {
 // ================================================================
 // РЕНДЕРИНГ: исходный тёмно-изумрудный стиль и те же формы карточек.
 // ================================================================
+// Background updates should not recreate identical DOM nodes: that resets scroll,
+// restarts card animations and makes Telegram WebView appear to flicker.
+const LAST_RENDERED_MARKUP = new WeakMap();
+let lastPaintedTab = null;
+function paintIfChanged(element, html) {
+  if (LAST_RENDERED_MARKUP.get(element) === html) return false;
+  element.innerHTML = html;
+  LAST_RENDERED_MARKUP.set(element, html);
+  return true;
+}
+
 function renderHeader() {
-  document.getElementById('header').innerHTML = `
+  const html = `
     <div class="flex items-center justify-between gap-2">
       <div class="flex items-center gap-3 min-w-0">
         <div class="logo-mark"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="#c7ff89" stroke-width="1.8" stroke-linecap="round"><path d="M20 3C11 3 5 8 5 15a5 5 0 0 0 5 5c7 0 10-8 10-17Z"/><path d="M4 21c4-6 8-10 13-13"/></svg></div>
@@ -3046,6 +3059,7 @@ function renderHeader() {
         ${APP_STATE.country ? `${flagSVG(APP_STATE.country)} ${esc(APP_STATE.nickname)}` : '🌏 NamuLab'}
       </div>
     </div>`;
+  paintIfChanged(document.getElementById('header'), html);
 }
 function renderLevelButtons() {
   return `<div class="mt-7 mb-5">
@@ -3417,9 +3431,10 @@ function renderProfile() {
 }
 function renderNav() {
   document.getElementById('bottomBar').setAttribute('aria-label',t('navigation'));
-  document.getElementById('bottomBar').innerHTML = `<div class="bottom-nav" aria-label="${t('navigation')}">
+  const html = `<div class="bottom-nav" aria-label="${t('navigation')}">
     ${['cards','ranking','profile'].map(tab => `<button type="button" data-tab="${tab}" class="${tab === APP_STATE.activeTab ? 'active' : ''}" aria-current="${tab === APP_STATE.activeTab ? 'page' : 'false'}">${icon(tab)}<span>${t(tab)}</span></button>`).join('')}
   </div>`;
+  paintIfChanged(document.getElementById('bottomBar'), html);
 }
 // Admin popup: 3 compact internal tabs, with existing emerald classes.
 function renderAdminPanel(){
@@ -3481,43 +3496,43 @@ function renderAdminPanel(){
 
 function renderModal() {
   const root = document.getElementById('modalRoot');
-  if (!APP_STATE.modalMode) { root.innerHTML=''; return; }
+  if (!APP_STATE.modalMode) { paintIfChanged(root, ''); return; }
   if(APP_STATE.modalMode==='admin-pin'){
-    root.innerHTML=`<div class="modal-overlay"><div class="modal-panel admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminPinTitle">
+    paintIfChanged(root, `<div class="modal-overlay"><div class="modal-panel admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminPinTitle">
       <div class="flex justify-between items-start gap-3"><div><div class="eyebrow mb-2">NamuLab · ${t('adminOwnerBadge')}</div><h2 id="adminPinTitle" class="text-xl font-extrabold">🛡️ ${t('adminPINTitle')}</h2></div><button data-action="adminClose" class="subtle-icon-btn" aria-label="${t('adminClose')}">${icon('close',18)}</button></div>
       <p class="muted text-xs leading-6 mt-3">${t('adminPINHint')}</p>
       <form id="adminPinForm" class="mt-4"><label for="adminPinField" class="eyebrow block mb-2">${t('adminPINLabel')}</label><input id="adminPinField" class="admin-input" type="password" maxlength="24" inputmode="numeric" autocomplete="off" value="${esc(APP_STATE.adminPINInput)}" ${APP_STATE.adminPINBusy?'disabled':''}/>
         ${APP_STATE.adminPINErrorKey?`<div class="admin-message mt-3" role="alert">${t(APP_STATE.adminPINErrorKey)}</div>`:''}
         <button class="primary-btn mt-4" type="submit" ${APP_STATE.adminPINBusy?'disabled':''}>${APP_STATE.adminPINBusy?t('adminLoading'):t('adminPINEnter')}</button></form>
       <p class="muted text-[11px] leading-5 mt-4">${t('adminOwnerOnly')}</p>
-    </div></div>`;
+    </div></div>`);
     return;
   }
   if(APP_STATE.modalMode==='admin'){
-    root.innerHTML=renderAdminPanel();
+    paintIfChanged(root, renderAdminPanel());
     return;
   }
   if (APP_STATE.modalMode === 'share') {
-    root.innerHTML=`<div class="modal-overlay" data-modal-overlay><div class="modal-panel share-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    paintIfChanged(root, `<div class="modal-overlay" data-modal-overlay><div class="modal-panel share-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <div class="flex items-start justify-between gap-3 mb-3"><div class="min-w-0"><h2 id="modalTitle" class="text-xl font-extrabold break-words">${t('shareModalTitle')}</h2><p class="text-xs muted mt-1">${t('shareSubtitle')}</p></div><button type="button" class="subtle-icon-btn" data-action="cancelModal" aria-label="${t('shareClose')}">${icon('close',18)}</button></div>
       ${APP_STATE.shareImage?`<img class="share-preview" src="${APP_STATE.shareImage}" alt="${esc(t('sharePreview'))}"/>`:`<div class="text-center muted p-6">${t('searching')}</div>`}
       <div class="share-buttons mt-3"><button class="secondary-btn" type="button" data-action="downloadShare">${t('shareDownload')}</button><button class="primary-btn" type="button" data-action="sendShare">${t('shareSend')}</button></div>
       ${APP_STATE.shareFallbackText?`<textarea class="input-text mt-3 text-xs" readonly rows="5" aria-label="${t('shareTextTitle')}">${esc(APP_STATE.shareFallbackText)}</textarea>`:''}
-    </div></div>`;
+    </div></div>`);
     return;
   }
   if (APP_STATE.modalMode === 'reset') {
-    root.innerHTML = `<div class="modal-overlay"><div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    paintIfChanged(root, `<div class="modal-overlay"><div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <div class="logo-mark mb-5">${icon('book')}</div>
       <h2 id="modalTitle" class="text-2xl font-extrabold">${t('resetTitle')}</h2>
       <p class="muted text-sm leading-6 mt-4">${t('resetDescription')}</p>
       <button class="primary-btn mt-7" data-action="confirmReset">${t('resetConfirm')}</button>
       <button class="w-full text-center muted text-sm py-4 mt-1" data-action="cancelModal">${t('cancel')}</button>
-    </div></div>`;
+    </div></div>`);
     return;
   }
   const first = APP_STATE.modalMode === 'onboarding';
-  root.innerHTML = `<div class="modal-overlay"><div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  paintIfChanged(root, `<div class="modal-overlay"><div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="logo-mark mb-6">${icon('leaf')}</div>
     <div class="eyebrow mb-3">NAMULAB • ${first?'01':'✦'}</div>
     <h2 id="modalTitle" class="text-2xl font-extrabold leading-tight">${first?t('welcome'):t('editTitle')}</h2>
@@ -3531,14 +3546,23 @@ function renderModal() {
     ${APP_STATE.nicknameErrorKey?`<p id="nicknameError" role="alert" class="mt-2 text-xs font-semibold leading-5 break-words" style="color:#ff9b9b;">${esc(t(APP_STATE.nicknameErrorKey))}${APP_STATE.nicknameErrorDetail?`<span class="block mt-1" style="color:#ffc5b5;">${esc(APP_STATE.nicknameErrorDetail)}</span>`:''}</p>`:''}
     <button class="primary-btn mt-7" data-action="saveProfile" ${APP_STATE.draftCountry&&!APP_STATE.nicknameChecking?'':'disabled'}>${APP_STATE.nicknameChecking?`${icon('search',17)}${t('nickChecking')}`:`${first?t('start'):t('saveChanges')}${icon('arrow')}`}</button>
     ${!first?`<button class="w-full text-center muted text-sm py-4 mt-1" data-action="cancelModal">${t('cancel')}</button>`:''}
-  </div></div>`;
+  </div></div>`);
 }
 function renderAll() {
   syncDailySearchRewards();
   persist();
   document.documentElement.lang = APP_STATE.language;
   renderHeader();
-  document.getElementById('main').innerHTML = `<div class="tab-content">${APP_STATE.activeTab === 'cards' ? renderCards() : APP_STATE.activeTab === 'ranking' ? renderRanking() : renderProfile()}</div>`;
+  const animateTab = lastPaintedTab !== APP_STATE.activeTab;
+  const main = document.getElementById('main');
+  const markup = `<div class="tab-content">${APP_STATE.activeTab === 'cards' ? renderCards() : APP_STATE.activeTab === 'ranking' ? renderRanking() : renderProfile()}</div>`;
+  const painted = paintIfChanged(main, markup);
+  // Animate only genuine tab changes, never a background Supabase refresh.
+  if(animateTab && painted && typeof main.firstElementChild?.animate === 'function' &&
+    !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)){
+    main.firstElementChild.animate([{opacity:.7,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:180,easing:'ease-out'});
+  }
+  lastPaintedTab = APP_STATE.activeTab;
   renderNav();
   renderModal();
 }
@@ -3899,29 +3923,49 @@ function speakFallback(value,lang,serial){
 }
 function speak(value,lang){
   if(!['en','ko'].includes(lang))return;
-  const text=String(value||'').trim();if(!text)return;
+  const text=String(value||'').trim();
+  if(!text)return;
   const serial=++speakingSerial;
-  try{currentAudio?.pause();if(currentAudio)currentAudio.src='';window.speechSynthesis?.cancel();}catch(error){}
-  currentAudio=null;nativeUtterance=null;
-  // Unofficial online TTS may throttle or be blocked; a native voice is the backup.
-  const url=`https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=${lang}&q=${encodeURIComponent(text.slice(0,180))}`;
+  // One active playback at a time. Start Audio synchronously from the user's click
+  // to preserve WebView's user-activation permission.
+  try{
+    if(currentAudio){currentAudio.pause();currentAudio.removeAttribute('src');currentAudio.load();}
+    window.speechSynthesis?.cancel();
+  }catch(error){console.info('[NamuLab TTS] Previous playback cleanup:',error);}
+  currentAudio=null;
+  nativeUtterance=null;
+  const voice=lang==='ko'?'Seoyeon':'Brian';
+  const url=`https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text)}`;
   let audio;
   try{audio=new Audio(url);}catch(error){speakFallback(text,lang,serial);return;}
   currentAudio=audio;
   audio.preload='auto';
-  let settled=false;
-  const timer=setTimeout(()=>fail(new Error('Online TTS timed out')),6500);
-  function done(){if(settled)return;settled=true;clearTimeout(timer);}
-  function fail(error){
-    if(settled||serial!==speakingSerial)return;
-    done();
-    console.info('[NamuLab TTS] Online audio unavailable; trying native voice:',error?.message||error);
+  audio.playsInline=true;
+  let started=false;
+  let finished=false;
+  let timer=null;
+  function onlineStarted(){
+    if(serial!==speakingSerial)return;
+    started=true;
+    finished=true;
+    clearTimeout(timer);
+    // No warning or fallback once online sound has started playing.
+  }
+  function onlineFailed(error){
+    if(finished || started || serial!==speakingSerial)return;
+    finished=true;
+    clearTimeout(timer);
+    console.info('[NamuLab TTS] StreamElements unavailable, trying native TTS:',error?.message||error);
     try{audio.pause();audio.removeAttribute('src');audio.load();}catch(e){}
     speakFallback(text,lang,serial);
   }
-  audio.addEventListener('playing',()=>done(),{once:true});
-  audio.addEventListener('error',()=>fail(new Error('Online audio fetch/playback error')),{once:true});
-  try{const play=audio.play();if(play&&typeof play.catch==='function')play.catch(fail);}catch(error){fail(error);}
+  audio.addEventListener('playing',onlineStarted,{once:true});
+  audio.addEventListener('error',()=>onlineFailed(new Error('Audio stream failed')),{once:true});
+  timer=setTimeout(()=>onlineFailed(new Error('Online TTS timeout')),8000);
+  try{
+    const promise=audio.play();
+    if(promise && typeof promise.catch==='function')promise.catch(onlineFailed);
+  }catch(error){onlineFailed(error);}
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
@@ -4487,13 +4531,26 @@ async function fetchCountryTotals(signal){
   }
   throw new Error('Country totals require the get_country_totals RPC for a community of 100,000+ users');
 }
-async function refreshCloudRanking({silent=false}={}){
+const CLOUD_BACKGROUND_RANKING_REFRESH_MS = 45000;
+let cloudRankingLastFetchAt = 0;
+let cloudRankingLastOrder = null;
+function rankingVisualSnapshot() {
+  return JSON.stringify({players:APP_STATE.cloudPlayers, totals:APP_STATE.cloudTotals,
+    available:APP_STATE.cloudTotalsAvailable, self:APP_STATE.cloudSelfAtTotals,
+    status:APP_STATE.cloudStatus});
+}
+async function refreshCloudRanking({silent=false,force=false}={}){
+  const requestedOrder = APP_STATE.sortBy==='streak'?'streak':'eco';
+  if (silent && !force && APP_STATE.cloudTotalsAvailable &&
+      cloudRankingLastOrder===requestedOrder &&
+      Date.now()-cloudRankingLastFetchAt<CLOUD_BACKGROUND_RANKING_REFRESH_MS) return;
   if(!sbClient){setCloudStatus('offline');if(!silent)toast(t('cloudNoServer'));return;}
   if(APP_STATE.cloudRefreshing){cloudRefreshAgain=true;return;}
   const id=++cloudRankingRequest;
   APP_STATE.cloudRefreshing=true;
-  renderAll();
+  if(!silent)renderAll();
   const guard=cloudDeadline();
+  let visualChange=false;
   try {
     const order=APP_STATE.sortBy==='streak'?'streak':'eco';
     const [topResult,totals,selfResult]=await Promise.all([
@@ -4508,13 +4565,17 @@ async function refreshCloudRanking({silent=false}={}){
     if(id!==cloudRankingRequest)return;
     const result=[];const seen=new Set();
     for(const row of topResult.data||[]){const user=sanitizeCloudPlayer(row);if(user&&!seen.has(user.id)){seen.add(user.id);result.push(user);}}
+    const before=rankingVisualSnapshot();
     APP_STATE.cloudPlayers=result;
     APP_STATE.cloudTotals=totals;
     APP_STATE.cloudTotalsAvailable=true;
     APP_STATE.cloudSelfAtTotals=selfResult.data&&validCountry(selfResult.data.country)
       ?{country:validCountry(selfResult.data.country),eco:safeNumber(selfResult.data.eco)}:null;
     if(APP_STATE.cloudStatus!=='syncing' && cloudProfileChecked)APP_STATE.cloudStatus='synced';
-    renderAll();
+    cloudRankingLastFetchAt=Date.now();
+    cloudRankingLastOrder=order;
+    // JSON-based equality check: do not rebuild an unchanged leaderboard.
+    visualChange=before!==rankingVisualSnapshot();
     if(!silent)toast(t('cloudRefreshDone'));
   }catch(error){
     reportCloudError('leaderboard / country totals',error,!silent);
@@ -4523,7 +4584,8 @@ async function refreshCloudRanking({silent=false}={}){
       if(!silent)toast(t('cloudRefreshFail'));
     }
   }finally{
-    guard.clear();APP_STATE.cloudRefreshing=false;renderAll();
+    guard.clear();APP_STATE.cloudRefreshing=false;
+    if(!silent || visualChange)renderAll();
     if(cloudRefreshAgain){cloudRefreshAgain=false;void refreshCloudRanking({silent:true});}
   }
 }
