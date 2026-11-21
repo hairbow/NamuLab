@@ -24,6 +24,31 @@
     create index if not exists namulab_users_eco_idx on public.users (eco desc);
     create index if not exists namulab_users_streak_idx on public.users (streak desc);
 
+    -- Run the following diagnostic SELECT first; resolve duplicates if any:
+    -- select lower(btrim(nickname)) as reserved_name,
+    --        count(*) as duplicates, array_agg(user_id) as user_ids
+    -- from public.users group by lower(btrim(nickname)) having count(*) > 1;
+    -- Then make nickname reservations atomic across browsers and devices:
+    create unique index if not exists namulab_users_nickname_unique
+      on public.users (lower(btrim(nickname)));
+
+    -- Reserve all 10 demonstration competitors at the database level, too.
+    -- If old records contain their names, rename those records first.
+    do $$
+    begin
+      if not exists (
+        select 1 from pg_constraint
+        where conrelid='public.users'::regclass
+        and conname='namulab_nickname_not_demo'
+      ) then
+        alter table public.users add constraint namulab_nickname_not_demo
+          check (lower(btrim(nickname)) not in
+          ('aigerim','jiwoo','daniel','daniyar','minjun','olivia',
+           'aruzhan','seoyeon','ethan','madi'));
+      end if;
+    end;
+    $$;
+
     create or replace function public.get_country_totals()
     returns table(country text,total_eco bigint)
     language sql stable security invoker
@@ -39,6 +64,172 @@
     use Supabase Auth and RLS, and check rewards server-side. A publishable key
     is public; the Telegram user_id read in browser is NOT verified authentication.
     The HTML is a functional client, not a secure replacement for that backend.
+  -->
+  <!--
+  ============================================================================
+  NAMULAB ADMIN: REQUIRED SERVER SETUP (copy into Supabase; NOT executed by HTML)
+  ============================================================================
+  1) SUPABASE SQL EDITOR -- create the public-read-only announcements table:
+
+  create table if not exists public.app_settings (
+    id integer primary key check (id=1),
+    announcement_text text not null default '',
+    is_active boolean not null default false,
+    updated_at timestamptz not null default now()
+  );
+  insert into public.app_settings(id,announcement_text,is_active)
+    values(1,'',false) on conflict (id) do nothing;
+  alter table public.app_settings enable row level security;
+  revoke all on table public.app_settings from anon, authenticated;
+  grant select on table public.app_settings to anon, authenticated;
+  drop policy if exists namulab_public_announcement on public.app_settings;
+  create policy namulab_public_announcement on public.app_settings
+    for select to anon, authenticated using (id=1);
+
+  Do not grant anon INSERT, UPDATE, or DELETE to app_settings or privileged
+  access to users. For all player edits, use ONLY the server-verified function.
+
+  2) SUPABASE EDGE FUNCTIONS -- deploy function named "namulab-admin".
+     Create file supabase/functions/namulab-admin/index.ts with the code below.
+     Set secrets TELEGRAM_BOT_TOKEN, ADMIN_PIN, and SUPABASE_SERVICE_ROLE_KEY
+     (or SUPABASE_SECRET_KEY). Never place the bot token or secret key in HTML.
+     Deploy with: supabase functions deploy namulab-admin --no-verify-jwt
+     The function itself authenticates every request using signed Telegram
+     initData, owner ID, and PIN; no open admin endpoint is provided.
+
+  ----- begin edge function index.ts -----
+  import { createClient } from 'npm:@supabase/supabase-js@2';
+
+  const OWNER_ID = '5283929866';
+  const HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Content-Type': 'application/json'
+  };
+  const encoder = new TextEncoder();
+  function respond(body: unknown, status=200) {
+    return new Response(JSON.stringify(body), {status,headers:HEADERS});
+  }
+  async function signedHmac(key: Uint8Array, message: string) {
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw', key as BufferSource, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC',cryptoKey,encoder.encode(message)));
+  }
+  function constantEqual(hex1:string, hex2:string) {
+    if(hex1.length!==hex2.length)return false;
+    let different=0;
+    for(let i=0;i<hex1.length;i++)different|=hex1.charCodeAt(i)^hex2.charCodeAt(i);
+    return different===0;
+  }
+  async function verifyTelegram(initData: string) {
+    const botToken=Deno.env.get('TELEGRAM_BOT_TOKEN');
+    if(!botToken||!initData||initData.length>16000)return false;
+    const params=new URLSearchParams(initData);
+    const received=params.get('hash')||'';
+    if(!/^[0-9a-f]{64}$/i.test(received))return false;
+    const authDate=Number(params.get('auth_date'));
+    const now=Math.floor(Date.now()/1000);
+    if(!Number.isSafeInteger(authDate)||authDate<now-86400||authDate>now+60)return false;
+    const rawUser=params.get('user');
+    if(!rawUser)return false;
+    let user;
+    try{user=JSON.parse(rawUser);}catch{return false;}
+    if(String(user?.id)!==OWNER_ID)return false;
+    const check=[...params.entries()]
+      .filter(([k])=>k!=='hash'&&k!=='signature')
+      .sort((a,b)=>a[0].localeCompare(b[0]))
+      .map(([k,v])=>`${k}=${v}`).join('\n');
+    const key=await signedHmac(encoder.encode('WebAppData'),botToken);
+    const hashed=await signedHmac(key,check);
+    const computed=[...hashed].map(b=>b.toString(16).padStart(2,'0')).join('');
+    return constantEqual(received.toLowerCase(),computed);
+  }
+
+  Deno.serve(async request=>{
+    if(request.method==='OPTIONS')return new Response(null,{status:204,headers:HEADERS});
+    if(request.method!=='POST')return respond({ok:false,error:'Method not allowed'},405);
+    try{
+      const body=await request.json();
+      const pin=Deno.env.get('ADMIN_PIN');
+      if(!pin||body?.pin!==pin||!await verifyTelegram(String(body?.initData||'')))
+        return respond({ok:false,error:'Forbidden'},403);
+      const url=Deno.env.get('SUPABASE_URL');
+      const secret=Deno.env.get('SUPABASE_SECRET_KEY')||Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+      if(!url||!secret)return respond({ok:false,error:'Missing backend secrets'},500);
+      const db=createClient(url,secret,{auth:{persistSession:false,autoRefreshToken:false}});
+      const action=String(body.action||'');
+      const userId=String(body.user_id||'').slice(0,100);
+      if(action==='verify'){
+        const {count,error}=await db.from('users').select('user_id',{count:'exact',head:true});
+        if(error)throw error;
+        return respond({ok:true,totalUsers:count||0});
+      }
+      if(action==='list_players'){
+        const offset=Math.max(0,Math.min(1000000,Number(body.offset)||0));
+        const limit=Math.max(1,Math.min(50,Number(body.limit)||30));
+        const {data,count,error}=await db.from('users')
+          .select('user_id,nickname,country,eco,streak,updated_at',{count:'exact'})
+          .order('updated_at',{ascending:false})
+          .range(offset,offset+limit-1);
+        if(error)throw error;
+        return respond({ok:true,players:data||[],total:count||0});
+      }
+      if(action==='set_announcement'){
+        const text=String(body.announcement_text||'').trim().slice(0,1500);
+        const active=body.is_active===true && text.length>0;
+        const updated_at=new Date().toISOString();
+        const {error}=await db.from('app_settings').upsert({
+          id:1,announcement_text:text,is_active:active,updated_at
+        },{onConflict:'id'});
+        if(error)throw error;
+        return respond({ok:true,updated_at});
+      }
+      if(!/^((tg_[0-9]{1,20})|(web_[A-Za-z0-9-]{12,90}))$/.test(userId))
+        return respond({ok:false,error:'Invalid user_id'},400);
+      if(action==='delete_user'){
+        const {error}=await db.from('users').delete().eq('user_id',userId);
+        if(error)throw error;
+        return respond({ok:true});
+      }
+      if(action==='set_eco'||action==='reset_nick'){
+        const {data:existing,error:readError}=await db.from('users')
+          .select('user_id,nickname,state_json').eq('user_id',userId).maybeSingle();
+        if(readError)throw readError;
+        if(!existing)return respond({ok:false,error:'User not found'},404);
+        const state=existing.state_json&&typeof existing.state_json==='object'
+          && !Array.isArray(existing.state_json)?{...existing.state_json}:{};
+        const changes:{[key:string]:unknown}={updated_at:new Date().toISOString()};
+        if(action==='set_eco'){
+          const eco=Number(body.eco);
+          if(!Number.isSafeInteger(eco)||eco<0||eco>1000000000)
+            return respond({ok:false,error:'Invalid ECO amount'},400);
+          state.eco=eco;
+          changes.eco=eco;
+        }else{
+          // A unique, nonempty placeholder keeps the nickname UNIQUE and NOT NULL.
+          const freshNick=`Guest_${crypto.randomUUID().replace(/-/g,'').slice(0,14)}`;
+          state.nickname=freshNick;
+          changes.nickname=freshNick;
+        }
+        changes.state_json=state;
+        const {error}=await db.from('users').update(changes).eq('user_id',userId);
+        if(error)throw error;
+        return respond({ok:true});
+      }
+      return respond({ok:false,error:'Unknown action'},400);
+    }catch(error){
+      console.error('NamuLab admin action failed',error);
+      return respond({ok:false,error:'Server error'},500);
+    }
+  });
+  ----- end edge function index.ts -----
+
+  IMPORTANT: a publishable Supabase key + a local PIN never authorize admin
+  writes. This gateway is intentionally required for mutations. Existing
+  browser-local ECO syncing still needs its own verified user auth + RLS before
+  the leaderboard can be trusted in an adversarial public environment.
+  ============================================================================
   -->
   <!-- Official Supabase JavaScript v2 SDK; no build step required. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -232,6 +423,28 @@
     .mini-number { white-space:nowrap; font-variant-numeric:tabular-nums; }
     .break-words { overflow-wrap:anywhere; }
     @media (max-width:380px) { .mode-switch button { font-size:10px; padding:10px 2px; } .case-picker-btn { padding:9px; font-size:11px; } .share-modal { padding:14px; } .share-buttons button { font-size:11px; } }
+    /* Admin extension: same emerald glass surfaces; no changes to existing components. */
+    .announcement-banner {display:flex;align-items:flex-start;gap:10px;border:1px solid #d9c98365;border-radius:16px;padding:12px 13px;background:linear-gradient(120deg,#194b36dc,#21361cc8);box-shadow:inset 0 1px #fff2,0 8px 20px #0003;color:#f6eaba;overflow-wrap:anywhere;}
+    .announcement-copy {min-width:0;flex:1;white-space:pre-wrap;font-size:12px;font-weight:700;line-height:1.6;overflow-wrap:anywhere;}
+    .announcement-close {flex:none;border:1px solid #e3d59133;background:#ffffff10;color:#f4e5ac;border-radius:9px;padding:5px;min-width:30px;min-height:30px;display:grid;place-items:center;}
+    .admin-modal {width:min(100%,480px);max-height:min(90dvh,820px);overflow-y:auto;overscroll-behavior:contain;padding:18px;scrollbar-width:thin;}
+    .admin-tabs {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;border-radius:14px;background:#061e18;border:1px solid #ffffff19;padding:4px;}
+    .admin-tabs button {min-width:0;border:0;border-radius:10px;padding:10px 3px;background:transparent;color:#a3bdae;font-weight:800;font-size:11px;overflow-wrap:anywhere;}
+    .admin-tabs button.active {background:#295740;color:#dcffb9;}
+    .admin-player-row {border:1px solid #ffffff1b;border-radius:14px;padding:12px;background:#0b2b23;margin-top:9px;min-width:0;overflow-wrap:anywhere;}
+    .admin-button-row {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:10px;}
+    .admin-button-row button {font-size:10px;min-height:38px;padding:6px 2px;border:1px solid #ffffff25;border-radius:10px;background:#ffffff0b;color:#d9e9df;overflow-wrap:anywhere;}
+    .admin-button-row button:last-child {color:#ffc3b2;border-color:#ffb7a43a;}
+    .admin-number {font-size:24px;font-weight:800;color:#d6ff9f;line-height:1.2;overflow-wrap:anywhere;}
+    .admin-switch {width:42px;height:24px;appearance:none;background:#25443a;border:1px solid #557e69;border-radius:40px;position:relative;cursor:pointer;flex:none;transition:background .2s;}
+    .admin-switch:checked {background:#a3db69;}
+    .admin-switch::after {content:'';display:block;position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#f2fff3;transition:transform .2s;}
+    .admin-switch:checked::after {transform:translateX(18px);}
+    .admin-input {display:block;width:100%;min-width:0;background:#09231c;border:1px solid #ffffff29;color:#f3fff1;border-radius:12px;padding:12px;font-size:13px;outline:none;}
+    .admin-input:focus {border-color:#b6f885;}
+    .admin-message {padding:11px 12px;border-radius:12px;border:1px solid #d8aa9340;color:#ffe0c9;background:#7f372524;font-size:12px;line-height:1.55;overflow-wrap:anywhere;}
+    .admin-confirm-box {margin-top:12px;padding:14px;border:1px solid #ecaa986b;border-radius:15px;background:#55271c3b;}
+    @media(max-width:380px){.admin-modal{padding:13px;}.admin-tabs button{font-size:10px;}.admin-button-row button{font-size:9px;}}
   </style>
 </head>
 <body>
@@ -245,6 +458,12 @@
 
   <script>
 'use strict';
+
+// Owner recognition for UI only. PIN is never a substitute for server security.
+// All privileged writes MUST be verified by the namulab-admin Edge Function.
+const ADMIN_TG_ID = [5283929866];
+const ADMIN_PIN = '7777';
+const ADMIN_FUNCTION_NAME = 'namulab-admin';
 
 // ================================================================
 // TERMS_DB — САМАЯ ПРОСТАЯ ЧАСТЬ ДЛЯ РАСШИРЕНИЯ БАЗЫ.
@@ -2572,12 +2791,78 @@ const CLOUD_UI = {
   ko:{cloudRefresh:'새로고침',cloudSynced:'클라우드 동기화 완료',cloudConnecting:'클라우드 연결 중…',cloudSyncing:'클라우드에 저장 중…',cloudOffline:'오프라인 · 이 기기에 학습 기록을 저장했어요',cloudError:'클라우드 연결 불가 · 기기에서 계속 학습할 수 있어요',cloudRefreshDone:'전체 순위를 새로 불러왔어요',cloudRefreshFail:'지금은 순위를 새로 불러올 수 없어요',cloudRankingSub:'실제 사용자와 체험용 참가자 10명',cloudDemo:'DEMO 표시가 있는 10명은 예시 사용자이며, 나머지는 Supabase에서 불러와요.',cloudDemoBadge:'DEMO',cloudRealBadge:'온라인',cloudNoServer:'Supabase에 연결할 수 없어요. 학습 기록은 기기에 안전하게 남아 있어요.',cloudRestored:'클라우드에 저장된 학습 기록을 불러왔어요',cloudLoadingLeaderboard:'참가자 정보를 불러오는 중…'}
 };
 for(const lang of ['ru','en','ko'])Object.assign(UI[lang],CLOUD_UI[lang]);
+// One localized set of labels for the new nickname reservation flow.
+const NICKNAME_UI = {
+  ru:{nickTaken:'Этот никнейм уже занят, придумайте другой.',nickChecking:'Проверяем никнейм…',nickUnavailable:'Не удалось проверить никнейм. Проверьте интернет и попробуйте ещё раз.',nickSaveFailed:'Не удалось сохранить никнейм. Попробуйте ещё раз.'},
+  en:{nickTaken:'This nickname is already taken. Please choose another.',nickChecking:'Checking nickname…',nickUnavailable:'Could not check nickname availability. Check your connection and try again.',nickSaveFailed:'Could not save the nickname. Please try again.'},
+  ko:{nickTaken:'이미 사용 중인 닉네임이에요. 다른 닉네임을 입력해 주세요.',nickChecking:'닉네임을 확인하고 있어요…',nickUnavailable:'닉네임 중복 여부를 확인할 수 없어요. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.',nickSaveFailed:'닉네임을 저장하지 못했어요. 다시 시도해 주세요.'}
+};
+for(const lang of ['ru','en','ko'])Object.assign(UI[lang],NICKNAME_UI[lang]);
 UI.ru.editSub='Ник и страна сохраняются на устройстве и синхронизируются с облаком при подключении.';
 UI.en.editSub='Your nickname and country are saved on this device and synced to the cloud when connected.';
 UI.ko.editSub='닉네임과 국가는 이 기기에 저장되며, 인터넷에 연결되면 클라우드와 동기화돼요.';
 
 
 
+
+// Admin-panel labels. The public learning app has no new navigation tabs.
+const ADMIN_UI = {
+  ru:{adminButton:'🛡️ Admin Panel',adminTitle:'Панель администратора',adminSubtitle:'Управление NamuLab',
+    adminPINTitle:'Вход администратора',adminPINHint:'Введите PIN. Изменение данных игроков доступно только владельцу через Telegram.',
+    adminPINLabel:'PIN-код',adminPINEnter:'Войти',adminPINWrong:'Неверный PIN-код.',
+    adminOwnerOnly:'Администрирование доступно только владельцу внутри Telegram. Ссылка ?admin=1 открывает форму, но не даёт прав.',
+    adminNoServer:'Для управления требуется защищённая функция Supabase namulab-admin. Проверьте её установку и подключение.',
+    adminForbidden:'Доступ не подтверждён. Проверьте Telegram-аккаунт и серверные настройки.',
+    adminOverview:'Обзор',adminAnnouncement:'📢 Объявление',adminPlayers:'👥 Игроки',adminPlayersCount:'Зарегистрированных игроков',
+    adminAnnouncementStatus:'Статус объявления',adminOn:'Опубликовано',adminOff:'Скрыто',adminEcoTotal:'ECO у игроков на странице',
+    adminAnnouncementLabel:'Текст объявления',adminAnnouncementPlaceholder:'Напишите объявление для всех игроков…',
+    adminBannerToggle:'Показывать баннер всем',adminPublish:'Сохранить и опубликовать',adminPublished:'Объявление сохранено',
+    adminLoading:'Загружаем данные…',adminNone:'Пока нет игроков',adminNickname:'Никнейм',adminCountry:'Страна',
+    adminUpdated:'Обновлён',adminEditEco:'✏️ ECO',adminResetNick:'🏷️ Сбросить ник',adminDelete:'🗑️ Удалить',
+    adminEcoLabel:'Новый баланс ECO',adminApply:'Применить',adminCancel:'Отмена',adminPrevious:'Назад',adminNext:'Вперёд',
+    adminConfirmReset:'Сбросить никнейм игрока?',adminConfirmDelete:'Удалить игрока и его сохранённый прогресс без возможности восстановления?',
+    adminConfirm:'Подтвердить',adminSaved:'Изменения сохранены в Supabase',adminError:'Не удалось выполнить действие. Попробуйте позже.',
+    adminRefresh:'Обновить',adminOffline:'Облако сейчас недоступно',adminClose:'Закрыть',adminOwnerBadge:'Только владелец',
+    announcementDismiss:'Закрыть объявление',adminPage:'Страница',adminEmptyAnnouncement:'Текст пока не опубликован',
+    adminServerSetup:'Для административных действий требуется защищённая Edge Function. Код и настройки описаны в комментарии в начале HTML.'},
+  en:{adminButton:'🛡️ Admin Panel',adminTitle:'Admin Panel',adminSubtitle:'Manage NamuLab',
+    adminPINTitle:'Administrator sign-in',adminPINHint:'Enter your PIN. Player management requires verified Telegram owner identity.',
+    adminPINLabel:'PIN',adminPINEnter:'Sign in',adminPINWrong:'Incorrect PIN.',
+    adminOwnerOnly:'Only the Telegram owner can administer this app. ?admin=1 shows the form, but grants no access.',
+    adminNoServer:'The secure Supabase namulab-admin function is required. Check its deployment and connection.',
+    adminForbidden:'Access could not be verified. Check your Telegram account and server setup.',
+    adminOverview:'Overview',adminAnnouncement:'📢 Announcement',adminPlayers:'👥 Players',adminPlayersCount:'Registered players',
+    adminAnnouncementStatus:'Announcement status',adminOn:'Published',adminOff:'Hidden',adminEcoTotal:'Player ECO on this page',
+    adminAnnouncementLabel:'Announcement text',adminAnnouncementPlaceholder:'Write an announcement for all players…',
+    adminBannerToggle:'Show banner to everyone',adminPublish:'Save and publish',adminPublished:'Announcement saved',
+    adminLoading:'Loading data…',adminNone:'No players yet',adminNickname:'Nickname',adminCountry:'Country',
+    adminUpdated:'Updated',adminEditEco:'✏️ ECO',adminResetNick:'🏷️ Reset nick',adminDelete:'🗑️ Delete',
+    adminEcoLabel:'New ECO balance',adminApply:'Apply',adminCancel:'Cancel',adminPrevious:'Previous',adminNext:'Next',
+    adminConfirmReset:'Reset this player’s nickname?',adminConfirmDelete:'Permanently delete this player and their saved progress?',
+    adminConfirm:'Confirm',adminSaved:'Changes saved in Supabase',adminError:'Action failed. Please try again later.',
+    adminRefresh:'Refresh',adminOffline:'Cloud unavailable',adminClose:'Close',adminOwnerBadge:'Owner only',
+    announcementDismiss:'Dismiss announcement',adminPage:'Page',adminEmptyAnnouncement:'No announcement published yet',
+    adminServerSetup:'A secure Edge Function is required for admin actions. Setup code is documented at the start of the HTML.'},
+  ko:{adminButton:'🛡️ 관리자 패널',adminTitle:'관리자 패널',adminSubtitle:'NamuLab 운영 관리',
+    adminPINTitle:'관리자 로그인',adminPINHint:'PIN을 입력해 주세요. 회원 정보 관리는 텔레그램 계정으로 소유자 인증을 완료해야 이용할 수 있어요.',
+    adminPINLabel:'PIN 번호',adminPINEnter:'로그인',adminPINWrong:'PIN 번호가 올바르지 않아요.',
+    adminOwnerOnly:'텔레그램으로 인증된 소유자만 관리할 수 있어요. ?admin=1은 로그인 화면만 표시해요.',
+    adminNoServer:'Supabase의 보안 함수 namulab-admin이 필요해요. 배포 및 연결 상태를 확인해 주세요.',
+    adminForbidden:'관리자 권한을 확인하지 못했어요. 텔레그램 계정과 서버 설정을 확인해 주세요.',
+    adminOverview:'현황',adminAnnouncement:'📢 공지사항',adminPlayers:'👥 회원 관리',adminPlayersCount:'등록된 회원',
+    adminAnnouncementStatus:'공지 상태',adminOn:'게시 중',adminOff:'비공개',adminEcoTotal:'현재 목록의 ECO 합계',
+    adminAnnouncementLabel:'공지 내용',adminAnnouncementPlaceholder:'모든 회원에게 보여 줄 공지를 입력해 주세요…',
+    adminBannerToggle:'모든 회원에게 공지 배너 표시',adminPublish:'저장하고 게시하기',adminPublished:'공지를 저장했어요.',
+    adminLoading:'불러오는 중이에요…',adminNone:'아직 가입한 회원이 없어요.',adminNickname:'닉네임',adminCountry:'국가',
+    adminUpdated:'최근 변경',adminEditEco:'✏️ ECO 수정',adminResetNick:'🏷️ 닉네임 초기화',adminDelete:'🗑️ 삭제',
+    adminEcoLabel:'새 ECO 잔액',adminApply:'적용',adminCancel:'취소',adminPrevious:'이전',adminNext:'다음',
+    adminConfirmReset:'이 회원의 닉네임을 초기화할까요?',adminConfirmDelete:'이 회원과 저장된 모든 학습 기록을 영구 삭제할까요?',
+    adminConfirm:'확인',adminSaved:'Supabase에 변경 사항을 저장했어요.',adminError:'처리하지 못했어요. 잠시 후 다시 시도해 주세요.',
+    adminRefresh:'새로고침',adminOffline:'현재 클라우드에 연결할 수 없어요.',adminClose:'닫기',adminOwnerBadge:'소유자 전용',
+    announcementDismiss:'공지 닫기',adminPage:'페이지',adminEmptyAnnouncement:'아직 게시된 공지가 없어요.',
+    adminServerSetup:'관리자 기능에는 보안 Edge Function이 필요해요. HTML 상단의 주석에 설치 방법이 있어요.'}
+};
+for(const lang of ['ru','en','ko'])Object.assign(UI[lang],ADMIN_UI[lang]);
 
 const STORAGE_KEY = 'namulab_release_v1';
 const PREV_V3_STORAGE_KEY = 'namulab_v3_v1';
@@ -2755,12 +3040,18 @@ function loadState() {
 
 // ЕДИНСТВЕННЫЙ ИСТОЧНИК ИСТИНЫ: все данные и видимые режимы находятся здесь.
 const APP_STATE = Object.assign(loadState(),{
-  flipped:false,modalMode:null,draftCountry:null,draftNickname:'',searchQuery:'',
+  flipped:false,modalMode:null,draftCountry:null,draftNickname:'',
+  nicknameChecking:false,nicknameErrorKey:null,nicknameCheckSerial:0,searchQuery:'',
   searchResult:null,searchLoading:false,searchErrorKey:null,searchSuggestions:[],requestSerial:0,
   requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',
   cloudStatus: SUPABASE_CLIENT ? 'connecting' : 'offline',cloudPlayers:[],
   cloudTotals:{KZ:0,KR:0,US:0},cloudTotalsAvailable:false,
-  cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null
+  cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null,
+  announcement:null,announcementDismissedKey:null,announcementLoading:false,
+  adminVerified:false,adminPINErrorKey:null,adminPINBusy:false,adminTab:'overview',
+  adminPINInput:'',adminNoticeText:'',adminNoticeActive:false,adminBusy:false,
+  adminErrorKey:null,adminPlayers:[],adminTotalPlayers:0,adminPage:0,adminPageSize:30,
+  adminEditUserId:null,adminEcoInput:'',adminConfirm:null,adminLastUpdated:null
 });
 APP_STATE.modalMode=APP_STATE.country && APP_STATE.nickname ? null : 'onboarding';
 APP_STATE.draftCountry=APP_STATE.country;
@@ -2779,6 +3070,9 @@ let pendingCloudWrite=false;
 let cloudReadRevision=0;
 let cloudRequestNumber=0;
 let cloudRankingRequest=0;
+let cloudInitializationPromise=null;
+// Remember the most recent nickname confirmed by Supabase, for a safe fallback.
+let lastConfirmedNickname=null;
 
 function getPersistentState(){
   const result={};
@@ -3014,12 +3308,34 @@ function renderLessonCard(term) {
     <div class="flex justify-center items-center gap-2 muted text-xs mt-4 mb-5">↻ ${t('tap')}</div>
     ${APP_STATE.focusTermId && APP_STATE.learnedIds.includes(term.id)?`<button class="primary-btn" data-action="releaseFocus">${icon('book',18)} ${t('backToCourse')}</button>`:`<button class="primary-btn" data-action="learn">${icon('check')} ${reward?`${t('learn')} (+${reward} ECO) 🌱`:`${t('repeatLearn')} (+0 ECO)`}</button>`}`;
 }
+// Public announcement: no admin secrets needed to read a banner.
+function announcementKey(value){
+  return value ? `${String(value.updated_at||'')}:${String(value.announcement_text||'')}` : '';
+}
+function renderAnnouncement(){
+  const announcement=APP_STATE.announcement;
+  if(!announcement || announcement.is_active!==true || !String(announcement.announcement_text||'').trim())return '';
+  if(APP_STATE.announcementDismissedKey===announcementKey(announcement))return '';
+  return `<aside class="announcement-banner mb-5" role="status">
+    <span class="text-lg shrink-0" aria-hidden="true">📢</span>
+    <div class="announcement-copy">${esc(announcement.announcement_text)}</div>
+    <button type="button" class="announcement-close" data-action="dismissAnnouncement" aria-label="${esc(t('announcementDismiss'))}">${icon('close',16)}</button>
+  </aside>`;
+}
+function isAdminEntryVisible(){
+  const hasOwnerID=ADMIN_TG_ID.some(id=>String(id)===String(telegramUser?.id||''));
+  let preview=false;
+  try{preview=new URLSearchParams(window.location.search).get('admin')==='1';}catch(error){}
+  return hasOwnerID || preview;
+}
+
 function renderCards() {
   const globalCount = APP_STATE.learnedIds.length;
   const courseTerms = getCourseTerms();
   const levelCount = courseTerms.filter(term => APP_STATE.learnedIds.includes(term.id)).length;
   const term = getCurrentTerm();
   return `
+    ${renderAnnouncement()}
     <div class="flex items-center gap-2 eyebrow"><span class="h-2 w-2 rounded-full bg-lime-300" style="box-shadow:0 0 14px #c5ff72"></span>${t('daily')}</div>
     <h1 class="section-title mt-4">${t('hero')}</h1>
     <p class="muted text-sm mt-3 leading-6">${t('subtitle')}</p>
@@ -3242,6 +3558,7 @@ function renderProfile() {
         }).join('')}
       </div>` : `<div class="glass rounded-[20px] p-6 text-center text-sm muted leading-6">♡ ${t('favoritesEmpty')}</div>`}
     </section>
+    ${isAdminEntryVisible()?`<button type="button" class="secondary-btn w-full mt-6" data-action="openAdmin" style="border-color:#dbca7450;color:#f5e4ad;">${t('adminButton')}</button>`:''}
     <button data-action="resetProgress" class="reset-btn w-full mt-7 flex justify-center gap-2 items-center">${icon('trash',17)}${t('resetProgress')}</button>
     <p class="text-xs muted mt-5 leading-5 text-center">${t('profileTip')}</p>`;
 }
@@ -3251,9 +3568,82 @@ function renderNav() {
     ${['cards','ranking','profile'].map(tab => `<button type="button" data-tab="${tab}" class="${tab === APP_STATE.activeTab ? 'active' : ''}" aria-current="${tab === APP_STATE.activeTab ? 'page' : 'false'}">${icon(tab)}<span>${t(tab)}</span></button>`).join('')}
   </div>`;
 }
+// Admin popup: 3 compact internal tabs, with existing emerald classes.
+function renderAdminPanel(){
+  const busy=APP_STATE.adminBusy;
+  const page=APP_STATE.adminPage;
+  const maxPages=Math.max(1,Math.ceil(APP_STATE.adminTotalPlayers/APP_STATE.adminPageSize));
+  const all=APP_STATE.adminPlayers;
+  const tab=APP_STATE.adminTab;
+  return `<div class="modal-overlay"><div class="modal-panel admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminPanelTitle">
+    <div class="flex items-start justify-between gap-2 mb-4"><div class="min-w-0"><div class="eyebrow mb-1">NAMULAB · ${t('adminOwnerBadge')}</div>
+      <h2 id="adminPanelTitle" class="text-xl font-extrabold break-words">${t('adminTitle')}</h2><p class="text-xs muted mt-1">${t('adminSubtitle')}</p></div>
+      <button class="subtle-icon-btn" type="button" data-action="adminClose" aria-label="${t('adminClose')}">${icon('close',17)}</button></div>
+    <div class="admin-tabs" role="tablist" aria-label="${t('adminTitle')}">
+      ${['overview','announcement','players'].map(id=>`<button type="button" role="tab" data-admin-tab="${id}" class="${tab===id?'active':''}" aria-selected="${tab===id}">${id==='overview'?'📊 ':''}${t(id==='overview'?'adminOverview':id==='announcement'?'adminAnnouncement':'adminPlayers')}</button>`).join('')}
+    </div>
+    ${APP_STATE.adminErrorKey?`<div class="admin-message mt-4" role="alert">${esc(t(APP_STATE.adminErrorKey))}</div>`:''}
+    ${tab==='overview'?`<div class="grid grid-cols-2 gap-3 mt-4">
+      <div class="glass rounded-2xl p-4"><div class="admin-number">${localeNumber(APP_STATE.adminTotalPlayers)}</div><div class="muted text-xs mt-2">${t('adminPlayersCount')}</div></div>
+      <div class="glass rounded-2xl p-4"><div class="text-[23px] mb-1">${APP_STATE.announcement?.is_active?'📢':'🔕'}</div><div class="text-sm font-extrabold">${t(APP_STATE.announcement?.is_active?'adminOn':'adminOff')}</div><div class="muted text-xs mt-1">${t('adminAnnouncementStatus')}</div></div>
+      <div class="glass rounded-2xl p-4 col-span-2"><div class="eyebrow mb-2">${t('adminAnnouncement')}</div><p class="text-sm leading-6 break-words">${esc(APP_STATE.announcement?.announcement_text||t('adminEmptyAnnouncement'))}</p></div>
+      <button class="secondary-btn col-span-2" type="button" data-action="adminRefresh" ${busy?'disabled':''}>🔄 ${t('adminRefresh')}</button>
+    </div>`:''}
+    ${tab==='announcement'?`<div class="glass rounded-2xl p-4 mt-4">
+      <label for="adminAnnouncementText" class="eyebrow block mb-3">${t('adminAnnouncementLabel')}</label>
+      <textarea id="adminAnnouncementText" class="admin-input" rows="6" maxlength="1500" placeholder="${esc(t('adminAnnouncementPlaceholder'))}" ${busy?'disabled':''}>${esc(APP_STATE.adminNoticeText)}</textarea>
+      <label class="flex items-center justify-between gap-3 mt-4 text-xs font-bold leading-5"><span class="break-words">${t('adminBannerToggle')}</span>
+        <input id="adminAnnouncementActive" class="admin-switch" type="checkbox" ${APP_STATE.adminNoticeActive?'checked':''} ${busy?'disabled':''}/></label>
+      <button type="button" class="primary-btn mt-5" data-action="adminPublish" ${busy?'disabled':''}>${busy?t('adminLoading'):t('adminPublish')}</button>
+    </div>`:''}
+    ${tab==='players'?`<section class="mt-4">
+      <div class="flex items-center justify-between gap-3"><span class="text-xs font-bold muted">${t('adminPlayersCount')}: ${localeNumber(APP_STATE.adminTotalPlayers)}</span>
+        <button type="button" class="cloud-refresh" data-action="adminRefresh" ${busy?'disabled':''}>🔄 ${t('adminRefresh')}</button></div>
+      ${!all.length?`<div class="glass rounded-xl p-6 text-center text-sm muted mt-3">${busy?t('adminLoading'):t('adminNone')}</div>`:''}
+      ${all.map(player=>`<div class="admin-player-row" data-user-id="${esc(player.id)}">
+        <div class="flex items-center gap-2"><span class="text-xl shrink-0">${COUNTRY_FLAGS[player.country]||'🌍'}</span>
+          <div class="min-w-0 flex-1"><div class="font-extrabold text-sm break-words">${esc(player.name)}</div>
+            <div class="muted text-[10px] break-words">${esc(player.id)} · ${player.country||'—'}</div></div>
+          <span class="text-lime-200 font-extrabold text-xs mini-number">${localeNumber(player.eco)} ECO</span></div>
+        <div class="admin-button-row">
+          <button type="button" data-action="adminSelectEco" data-admin-user="${esc(player.id)}" ${busy?'disabled':''}>${t('adminEditEco')}</button>
+          <button type="button" data-action="adminAskResetNick" data-admin-user="${esc(player.id)}" ${busy?'disabled':''}>${t('adminResetNick')}</button>
+          <button type="button" data-action="adminAskDelete" data-admin-user="${esc(player.id)}" ${busy?'disabled':''}>${t('adminDelete')}</button>
+        </div>
+        ${APP_STATE.adminEditUserId===player.id?`<div class="mt-3"><label for="adminEcoInput" class="eyebrow block mb-2">${t('adminEcoLabel')}</label>
+          <div class="flex items-center gap-2"><input id="adminEcoInput" class="admin-input min-w-0 flex-1" type="number" min="0" max="1000000000" step="1" value="${esc(APP_STATE.adminEcoInput)}"/>
+            <button data-action="adminSaveEco" type="button" class="favorite-open" ${busy?'disabled':''}>${t('adminApply')}</button></div></div>`:''}
+      </div>`).join('')}
+      ${APP_STATE.adminConfirm?`<div class="admin-confirm-box" role="alertdialog"><div class="text-sm leading-6 font-bold">${t(APP_STATE.adminConfirm.kind==='delete'?'adminConfirmDelete':'adminConfirmReset')}</div>
+        <div class="text-xs muted mt-1 break-words">${esc(APP_STATE.adminConfirm.name)}</div>
+        <div class="flex gap-2 mt-4"><button type="button" class="reset-btn flex-1" data-action="adminExecuteConfirm" ${busy?'disabled':''}>${t('adminConfirm')}</button>
+          <button type="button" class="secondary-btn flex-1" data-action="adminCancelConfirm">${t('adminCancel')}</button></div></div>`:''}
+      <div class="flex justify-between items-center gap-2 mt-4"><button class="cloud-refresh" type="button" data-action="adminPrevious" ${page===0||busy?'disabled':''}>‹ ${t('adminPrevious')}</button>
+        <span class="text-[11px] muted">${t('adminPage')} ${page+1} / ${maxPages}</span>
+        <button class="cloud-refresh" type="button" data-action="adminNext" ${page+1>=maxPages||busy?'disabled':''}>${t('adminNext')} ›</button></div>
+    </section>`:''}
+    <p class="text-[11px] muted mt-5 leading-5">${t('adminServerSetup')}</p>
+  </div></div>`;
+}
+
 function renderModal() {
   const root = document.getElementById('modalRoot');
   if (!APP_STATE.modalMode) { root.innerHTML=''; return; }
+  if(APP_STATE.modalMode==='admin-pin'){
+    root.innerHTML=`<div class="modal-overlay"><div class="modal-panel admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminPinTitle">
+      <div class="flex justify-between items-start gap-3"><div><div class="eyebrow mb-2">NamuLab · ${t('adminOwnerBadge')}</div><h2 id="adminPinTitle" class="text-xl font-extrabold">🛡️ ${t('adminPINTitle')}</h2></div><button data-action="adminClose" class="subtle-icon-btn" aria-label="${t('adminClose')}">${icon('close',18)}</button></div>
+      <p class="muted text-xs leading-6 mt-3">${t('adminPINHint')}</p>
+      <form id="adminPinForm" class="mt-4"><label for="adminPinField" class="eyebrow block mb-2">${t('adminPINLabel')}</label><input id="adminPinField" class="admin-input" type="password" maxlength="24" inputmode="numeric" autocomplete="off" value="${esc(APP_STATE.adminPINInput)}" ${APP_STATE.adminPINBusy?'disabled':''}/>
+        ${APP_STATE.adminPINErrorKey?`<div class="admin-message mt-3" role="alert">${t(APP_STATE.adminPINErrorKey)}</div>`:''}
+        <button class="primary-btn mt-4" type="submit" ${APP_STATE.adminPINBusy?'disabled':''}>${APP_STATE.adminPINBusy?t('adminLoading'):t('adminPINEnter')}</button></form>
+      <p class="muted text-[11px] leading-5 mt-4">${t('adminOwnerOnly')}</p>
+    </div></div>`;
+    return;
+  }
+  if(APP_STATE.modalMode==='admin'){
+    root.innerHTML=renderAdminPanel();
+    return;
+  }
   if (APP_STATE.modalMode === 'share') {
     root.innerHTML=`<div class="modal-overlay" data-modal-overlay><div class="modal-panel share-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <div class="flex items-start justify-between gap-3 mb-3"><div class="min-w-0"><h2 id="modalTitle" class="text-xl font-extrabold break-words">${t('shareModalTitle')}</h2><p class="text-xs muted mt-1">${t('shareSubtitle')}</p></div><button type="button" class="subtle-icon-btn" data-action="cancelModal" aria-label="${t('shareClose')}">${icon('close',18)}</button></div>
@@ -3280,12 +3670,13 @@ function renderModal() {
     <h2 id="modalTitle" class="text-2xl font-extrabold leading-tight">${first?t('welcome'):t('editTitle')}</h2>
     <p class="muted text-sm leading-6 mt-3 mb-7">${first?t('welcomeSub'):t('editSub')}</p>
     <div class="eyebrow mb-3">${t('countrySelect')}</div>
-    <div class="grid gap-2">${COUNTRIES.map(country => `<button type="button" class="country-option ${APP_STATE.draftCountry === country ? 'active' : ''}" data-country="${country}" aria-pressed="${APP_STATE.draftCountry === country}">
+    <div class="grid gap-2">${COUNTRIES.map(country => `<button type="button" class="country-option ${APP_STATE.draftCountry === country ? 'active' : ''}" data-country="${country}" aria-pressed="${APP_STATE.draftCountry === country}" ${APP_STATE.nicknameChecking?'disabled':''}>
       <span class="text-3xl">${COUNTRY_FLAGS[country]}</span><span class="text-sm font-bold">${t('countryNames')[country]}</span><span class="check"></span>
     </button>`).join('')}</div>
     <label for="nicknameInput" class="block eyebrow mt-7 mb-3">${t('nickname')}</label>
-    <input id="nicknameInput" class="input-text" type="text" maxlength="22" autocomplete="nickname" value="${esc(APP_STATE.draftNickname)}" placeholder="${esc(t('nickPlaceholder'))}" />
-    <button class="primary-btn mt-7" data-action="saveProfile" ${APP_STATE.draftCountry?'':'disabled'}>${first?t('start'):t('saveChanges')}${icon('arrow')}</button>
+    <input id="nicknameInput" class="input-text" type="text" maxlength="22" autocomplete="nickname" value="${esc(APP_STATE.draftNickname)}" placeholder="${esc(t('nickPlaceholder'))}" aria-invalid="${APP_STATE.nicknameErrorKey?'true':'false'}" ${APP_STATE.nicknameErrorKey?'aria-describedby="nicknameError"':''} ${APP_STATE.nicknameChecking?'disabled':''} />
+    ${APP_STATE.nicknameErrorKey?`<p id="nicknameError" role="alert" class="mt-2 text-xs font-semibold leading-5 break-words" style="color:#ff9b9b;">${esc(t(APP_STATE.nicknameErrorKey))}</p>`:''}
+    <button class="primary-btn mt-7" data-action="saveProfile" ${APP_STATE.draftCountry&&!APP_STATE.nicknameChecking?'':'disabled'}>${APP_STATE.nicknameChecking?`${icon('search',17)}${t('nickChecking')}`:`${first?t('start'):t('saveChanges')}${icon('arrow')}`}</button>
     ${!first?`<button class="w-full text-center muted text-sm py-4 mt-1" data-action="cancelModal">${t('cancel')}</button>`:''}
   </div></div>`;
 }
@@ -3634,17 +4025,115 @@ function speak(value,lang) {
   }catch(error){console.info('Speech synthesis unavailable',error);toast(t('audioUnavailable'));}
 }
 function openEditProfile() {
+  APP_STATE.nicknameCheckSerial++;
+  APP_STATE.nicknameChecking=false;
+  APP_STATE.nicknameErrorKey=null;
   APP_STATE.draftCountry=APP_STATE.country;
   APP_STATE.draftNickname=APP_STATE.nickname;
   APP_STATE.modalMode='edit';renderAll();
 }
-function saveProfile() {
-  if(!COUNTRIES.includes(APP_STATE.draftCountry))return;
+// Reserve a name only after both checking its availability and getting a
+// successful database upsert. The database's unique LOWER(TRIM()) index is
+// what makes this race-safe when two people click Save simultaneously.
+function normalizeNickname(name) {
+  return String(name||'').trim().normalize('NFKC').toLowerCase();
+}
+function escapeIlikeLiteral(name) {
+  // Escape %, _ and \ so usernames are matched literally, not as SQL wildcards.
+  return String(name).replace(/[\\%_]/g,character=>'\\'+character);
+}
+function isReservedBotNickname(name) {
+  return DEMO_PLAYERS.some(player=>normalizeNickname(player.name)===normalizeNickname(name));
+}
+function showNicknameError(key) {
+  APP_STATE.nicknameChecking=false;
+  APP_STATE.nicknameErrorKey=key;
+  renderAll();
+}
+async function waitForCloudWrite(signal) {
+  // Avoid racing the existing background upsert with a nickname reservation.
+  while(cloudSaveInFlight) {
+    if(signal.aborted)throw new Error('Nickname request timed out');
+    await new Promise(resolve=>setTimeout(resolve,40));
+  }
+}
+async function saveProfile() {
+  if(APP_STATE.nicknameChecking || !COUNTRIES.includes(APP_STATE.draftCountry))return;
   const field=document.getElementById('nicknameInput');
-  const name=String(field?.value?.trim() || APP_STATE.draftNickname || telegramName || t('noName')).trim().slice(0,22);
-  APP_STATE.nickname=name;APP_STATE.country=APP_STATE.draftCountry;
-  APP_STATE.draftNickname=name;APP_STATE.modalMode=null;
-  renderAll();toast(t('savedProfile'));haptic();
+  const name=String(field?.value ?? APP_STATE.draftNickname ?? '').trim();
+  const country=APP_STATE.draftCountry;
+  if(!name || name.length>22) { showNicknameError('invalidName'); return; }
+  APP_STATE.draftNickname=name;
+  APP_STATE.nicknameErrorKey=null;
+  if(isReservedBotNickname(name)) { showNicknameError('nickTaken'); return; }
+  if(!SUPABASE_CLIENT || typeof navigator!=='undefined' && navigator.onLine===false) {
+    showNicknameError('nickUnavailable');return;
+  }
+  APP_STATE.nicknameChecking=true;
+  const requestId=++APP_STATE.nicknameCheckSerial;
+  const modal=APP_STATE.modalMode;
+  renderAll();
+  let guard=null;
+  let acquiredWriteLock=false;
+  const isCurrent=()=>requestId===APP_STATE.nicknameCheckSerial && APP_STATE.modalMode===modal;
+  try {
+    // Wait for the initial cloud profile read, so we never overwrite a newer
+    // remote progress snapshot with an older local onboarding snapshot.
+    if(!cloudProfileChecked)await startCloudInitialization();
+    if(!isCurrent())return;
+    if(!cloudProfileChecked)throw new Error('Cloud profile is not available');
+    guard=cloudDeadline();
+    const {data:otherUsers,error:checkError}=await SUPABASE_CLIENT.from('users')
+      .select('user_id')
+      .ilike('nickname',escapeIlikeLiteral(name))
+      .neq('user_id',USER_ID)
+      .limit(1)
+      .abortSignal(guard.signal);
+    if(checkError)throw checkError;
+    if(!isCurrent())return;
+    if(otherUsers?.length){showNicknameError('nickTaken');return;}
+
+    // A successful lookup is not enough: claim the name atomically now.
+    // If another user wins a race, PostgreSQL returns 23505.
+    await waitForCloudWrite(guard.signal);
+    if(!isCurrent())return;
+    cloudSaveInFlight=true;
+    acquiredWriteLock=true;
+    clearTimeout(cloudDebounceTimer);
+    const data={...getPersistentState(),nickname:name,country};
+    const {error:saveError}=await SUPABASE_CLIENT.from('users').upsert({
+      user_id:USER_ID,nickname:name,country,
+      eco:safeNumber(APP_STATE.eco),streak:safeNumber(effectiveStreak()),
+      state_json:data,updated_at:new Date().toISOString()
+    },{onConflict:'user_id'}).abortSignal(guard.signal);
+    if(saveError)throw saveError;
+    if(!isCurrent())return;
+    APP_STATE.nickname=name;
+    APP_STATE.country=country;
+    APP_STATE.modalMode=null;
+    APP_STATE.nicknameChecking=false;
+    APP_STATE.nicknameErrorKey=null;
+    lastConfirmedNickname=name;
+    localEditedAt=Date.now();
+    localDirty=false;
+    lastSavedSnapshot=JSON.stringify(getPersistentState());
+    storeLocalEnvelope(getPersistentState());
+    APP_STATE.cloudLastSyncedAt=Date.now();
+    APP_STATE.cloudStatus='synced';
+    pendingCloudWrite=false;
+    renderAll();toast(t('savedProfile'));haptic();
+    if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
+  }catch(error){
+    console.warn('Nickname verification/reservation failed',error);
+    if(!isCurrent())return;
+    const duplicate=String(error?.code||'')==='23505' || String(error?.code||'')==='23514' && isReservedBotNickname(name);
+    showNicknameError(duplicate?'nickTaken':'nickUnavailable');
+  }finally{
+    guard?.clear();
+    if(acquiredWriteLock)cloudSaveInFlight=false;
+    if(isCurrent() && APP_STATE.nicknameChecking){APP_STATE.nicknameChecking=false;renderAll();}
+    if(pendingCloudWrite && !APP_STATE.nicknameChecking){pendingCloudWrite=false;scheduleCloudSave();}
+  }
 }
 function toggleFavorite() {
   const result=APP_STATE.searchResult;if(!result)return;
@@ -3889,18 +4378,20 @@ function installPersistedState(next,remoteTime,keepDirty=false){
   lastSavedSnapshot=JSON.stringify(getPersistentState());
   storeLocalEnvelope(getPersistentState());
   applyingCloudState=false;
-  APP_STATE.modalMode=APP_STATE.country&&APP_STATE.nickname?null:'onboarding';
+  if(!['admin-pin','admin'].includes(APP_STATE.modalMode))APP_STATE.modalMode=APP_STATE.country&&APP_STATE.nickname?null:'onboarding';
   APP_STATE.draftCountry=APP_STATE.country;
   APP_STATE.draftNickname=APP_STATE.nickname||telegramName;
   renderAll();
 }
 function scheduleCloudSave(){
   if(!cloudBootstrapped || !cloudProfileChecked || !SUPABASE_CLIENT)return;
+  if(APP_STATE.nicknameChecking){pendingCloudWrite=true;return;}
   clearTimeout(cloudDebounceTimer);
   cloudDebounceTimer=setTimeout(()=>{void flushCloudSave();},500);
 }
 async function flushCloudSave(){
   if(!SUPABASE_CLIENT || !cloudBootstrapped || !cloudProfileChecked || !localDirty || !APP_STATE.country || !APP_STATE.nickname)return;
+  if(APP_STATE.nicknameChecking){pendingCloudWrite=true;return;}
   if(cloudSaveInFlight){pendingCloudWrite=true;return;}
   if(typeof navigator!=='undefined' && navigator.onLine===false){setCloudStatus('offline');return;}
   cloudSaveInFlight=true;
@@ -3917,6 +4408,7 @@ async function flushCloudSave(){
     const {error}=await SUPABASE_CLIENT.from('users')
       .upsert(row,{onConflict:'user_id'}).abortSignal(guard.signal);
     if(error)throw error;
+    lastConfirmedNickname=row.nickname;
     if(snapshot===JSON.stringify(getPersistentState())){
       localDirty=false;
       commitLocalCache();
@@ -3928,7 +4420,19 @@ async function flushCloudSave(){
     if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
   } catch(error){
     console.warn('Supabase save failed; local progress preserved',error);
-    setCloudStatus(navigator.onLine===false?'offline':'error');
+    if(String(error?.code||'')==='23505'){
+      // Delayed upserts must never silently swallow nickname collisions.
+      const proposed=APP_STATE.nickname;
+      APP_STATE.nicknameCheckSerial++;
+      APP_STATE.nicknameChecking=false;
+      APP_STATE.nicknameErrorKey='nickTaken';
+      APP_STATE.draftNickname=proposed;
+      APP_STATE.draftCountry=APP_STATE.country;
+      APP_STATE.nickname=lastConfirmedNickname||'';
+      APP_STATE.modalMode=APP_STATE.nickname?'edit':'onboarding';
+      renderAll();
+      toast(t('nickTaken'));
+    } else setCloudStatus(navigator.onLine===false?'offline':'error');
   } finally {
     guard.clear();cloudSaveInFlight=false;
     if(pendingCloudWrite){pendingCloudWrite=false;scheduleCloudSave();}
@@ -3947,6 +4451,7 @@ async function initializeCloud(){
     if(error)throw error;
     if(token!==cloudReadRevision)return;
     if(remote){
+      lastConfirmedNickname=String(remote.nickname||'').trim();
       const remoteState=normalizeState({...remote.state_json,
         nickname:remote.nickname,country:remote.country,eco:remote.eco,streak:remote.streak});
       const remoteTime=readTimestamp(remote.updated_at);
@@ -3980,6 +4485,12 @@ async function initializeCloud(){
     guard.clear();
     if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
   }
+}
+function startCloudInitialization(){
+  if(cloudProfileChecked)return Promise.resolve();
+  if(cloudInitializationPromise)return cloudInitializationPromise;
+  cloudInitializationPromise=initializeCloud().finally(()=>{cloudInitializationPromise=null;});
+  return cloudInitializationPromise;
 }
 async function fetchCountryTotals(signal){
   // Fast, scalable path if the optional SQL aggregation function exists.
@@ -4044,11 +4555,207 @@ async function refreshCloudRanking({silent=false}={}){
   }
 }
 
+// ================================================================
+// ANNOUNCEMENTS: public read from app_settings (id=1), no UI blocking.
+// ADMIN: privileged requests go through a verified Telegram Edge Function.
+// The publishable key and JavaScript PIN do NOT authorize modifications.
+// ================================================================
+let adminSessionPIN='';
+let announcementsRequest=0;
+async function loadPublicAnnouncement(){
+  if(!SUPABASE_CLIENT)return;
+  const reqId=++announcementsRequest;
+  try{
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),6000);
+    let response;
+    try{response=await SUPABASE_CLIENT.from('app_settings')
+      .select('id,announcement_text,is_active,updated_at')
+      .eq('id',1).maybeSingle().abortSignal(controller.signal);
+    }finally{clearTimeout(timer);}
+    if(reqId!==announcementsRequest)return;
+    if(response.error)throw response.error;
+    const row=response.data;
+    APP_STATE.announcement=row?{
+      id:1,announcement_text:String(row.announcement_text||'').slice(0,1500),
+      is_active:row.is_active===true,updated_at:String(row.updated_at||'')
+    }:null;
+    renderAll();
+  }catch(error){
+    console.info('Announcement unavailable; learning continues',error?.message||error);
+  }
+}
+function dismissAnnouncement(){
+  APP_STATE.announcementDismissedKey=announcementKey(APP_STATE.announcement);
+  renderAll();haptic();
+}
+function adminFailKey(error){
+  const status=Number(error?.context?.status||error?.status||0);
+  if(status===401||status===403)return 'adminForbidden';
+  if(status===404)return 'adminNoServer';
+  const msg=String(error?.message||error||'').toLowerCase();
+  if(/telegram|identity|not owner|forbidden|unauthorized|403|401/.test(msg))return 'adminForbidden';
+  if(/404|function|fetch|network|failed to send/.test(msg))return 'adminNoServer';
+  return 'adminError';
+}
+async function callAdminGateway(action,payload={}){
+  if(!SUPABASE_CLIENT)throw Error('Function unavailable: Supabase SDK');
+  if(!telegram?.initData)throw Error('Telegram signed identity required');
+  const {data,error}=await SUPABASE_CLIENT.functions.invoke(ADMIN_FUNCTION_NAME,{
+    body:{action,pin:adminSessionPIN||APP_STATE.adminPINInput,initData:telegram.initData,...payload}
+  });
+  if(error)throw error;
+  if(!data||data.ok!==true)throw Error(data?.error||'Function returned an invalid response');
+  return data;
+}
+function openAdmin(){
+  if(!isAdminEntryVisible())return;
+  APP_STATE.adminVerified=false;
+  adminSessionPIN='';
+  APP_STATE.adminPINInput='';APP_STATE.adminPINErrorKey=null;
+  APP_STATE.adminErrorKey=null;
+  APP_STATE.modalMode='admin-pin';renderAll();haptic();
+}
+async function verifyAdmin(){
+  if(APP_STATE.adminPINBusy)return;
+  if(APP_STATE.adminPINInput!==ADMIN_PIN){
+    APP_STATE.adminPINErrorKey='adminPINWrong';renderAll();return;
+  }
+  APP_STATE.adminPINBusy=true;APP_STATE.adminPINErrorKey=null;renderAll();
+  try{
+    adminSessionPIN=APP_STATE.adminPINInput;
+    const result=await callAdminGateway('verify');
+    APP_STATE.adminVerified=true;
+    APP_STATE.adminPINInput='';
+    APP_STATE.adminTotalPlayers=safeNumber(result.totalUsers);
+    APP_STATE.adminNoticeText=APP_STATE.announcement?.announcement_text||'';
+    APP_STATE.adminNoticeActive=Boolean(APP_STATE.announcement?.is_active);
+    APP_STATE.adminTab='overview';APP_STATE.modalMode='admin';
+    renderAll();
+    void loadAdminPlayers();
+  }catch(error){
+    adminSessionPIN='';
+    APP_STATE.adminPINErrorKey=adminFailKey(error);
+    renderAll();
+  }finally{APP_STATE.adminPINBusy=false;renderAll();}
+}
+function closeAdmin(){
+  adminSessionPIN='';
+  APP_STATE.adminVerified=false;APP_STATE.adminPINInput='';
+  APP_STATE.adminPINErrorKey=null;APP_STATE.adminConfirm=null;
+  APP_STATE.modalMode=null;renderAll();
+}
+function sanitizeAdminRows(rows){
+  return (Array.isArray(rows)?rows:[]).map(row=>{
+    const clean=sanitizeCloudPlayer(row);
+    return clean?{...clean,updated_at:String(row.updated_at||'')}:null;
+  }).filter(Boolean);
+}
+async function loadAdminPlayers(){
+  if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  try{
+    const response=await callAdminGateway('list_players',{
+      offset:APP_STATE.adminPage*APP_STATE.adminPageSize,limit:APP_STATE.adminPageSize
+    });
+    APP_STATE.adminPlayers=sanitizeAdminRows(response.players);
+    APP_STATE.adminTotalPlayers=safeNumber(response.total);
+    APP_STATE.adminLastUpdated=Date.now();
+  }catch(error){
+    console.warn('Admin list failed',error);
+    APP_STATE.adminErrorKey=adminFailKey(error);
+  }finally{APP_STATE.adminBusy=false;renderAll();}
+}
+function chooseAdminTab(tab){
+  if(!APP_STATE.adminVerified||!['overview','announcement','players'].includes(tab))return;
+  APP_STATE.adminTab=tab;APP_STATE.adminErrorKey=null;APP_STATE.adminConfirm=null;
+  renderAll();
+  if(tab==='players'&&!APP_STATE.adminLastUpdated)void loadAdminPlayers();
+}
+async function publishAdminAnnouncement(){
+  if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
+  const text=String(APP_STATE.adminNoticeText||'').trim().slice(0,1500);
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  try{
+    const response=await callAdminGateway('set_announcement',{
+      announcement_text:text,is_active:Boolean(APP_STATE.adminNoticeActive)
+    });
+    const showBanner=Boolean(APP_STATE.adminNoticeActive)&&text.length>0;
+    APP_STATE.adminNoticeActive=showBanner;
+    APP_STATE.announcement={id:1,announcement_text:text,
+      is_active:showBanner,updated_at:response.updated_at||new Date().toISOString()};
+    APP_STATE.announcementDismissedKey=null;
+    toast(t('adminPublished'));
+  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
+  finally{APP_STATE.adminBusy=false;renderAll();}
+}
+function selectAdminEco(userId){
+  const p=APP_STATE.adminPlayers.find(row=>row.id===userId);
+  if(!p||!APP_STATE.adminVerified)return;
+  APP_STATE.adminEditUserId=userId;
+  APP_STATE.adminEcoInput=String(p.eco);
+  APP_STATE.adminConfirm=null;APP_STATE.adminErrorKey=null;renderAll();
+}
+async function saveAdminEco(){
+  if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
+  const value=Number(APP_STATE.adminEcoInput);
+  if(!Number.isSafeInteger(value)||value<0||value>1000000000){APP_STATE.adminErrorKey='adminError';renderAll();return;}
+  const userId=APP_STATE.adminEditUserId;
+  if(!APP_STATE.adminPlayers.some(row=>row.id===userId))return;
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  try{
+    await callAdminGateway('set_eco',{user_id:userId,eco:value});
+    APP_STATE.adminEditUserId=null;
+    toast(t('adminSaved'));
+    APP_STATE.adminPlayers=APP_STATE.adminPlayers.map(p=>p.id===userId?{...p,eco:value}:p);
+    await refreshCloudRanking({silent:true});
+  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
+  finally{APP_STATE.adminBusy=false;renderAll();}
+}
+function askAdminConfirm(kind,userId){
+  if(!APP_STATE.adminVerified||!['reset','delete'].includes(kind))return;
+  const p=APP_STATE.adminPlayers.find(row=>row.id===userId);
+  if(!p)return;
+  APP_STATE.adminConfirm={kind,id:p.id,name:p.name};
+  APP_STATE.adminEditUserId=null;APP_STATE.adminErrorKey=null;renderAll();
+}
+async function executeAdminConfirm(){
+  const task=APP_STATE.adminConfirm;
+  if(!APP_STATE.adminVerified||APP_STATE.adminBusy||!task)return;
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  try{
+    await callAdminGateway(task.kind==='delete'?'delete_user':'reset_nick',{user_id:task.id});
+    APP_STATE.adminConfirm=null;
+    toast(t('adminSaved'));
+    if(task.kind==='delete'){
+      APP_STATE.adminPlayers=APP_STATE.adminPlayers.filter(row=>row.id!==task.id);
+      APP_STATE.adminTotalPlayers=Math.max(0,APP_STATE.adminTotalPlayers-1);
+    }
+    APP_STATE.adminBusy=false;
+    await loadAdminPlayers();
+    void refreshCloudRanking({silent:true});
+  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
+  finally{APP_STATE.adminBusy=false;renderAll();}
+}
+
 function handleAction(action,element) {
   switch(action){
+    case 'openAdmin':openAdmin();break;
+    case 'adminClose':closeAdmin();break;
+    case 'dismissAnnouncement':dismissAnnouncement();break;
+    case 'adminRefresh':void loadAdminPlayers();break;
+    case 'adminPublish':void publishAdminAnnouncement();break;
+    case 'adminSelectEco':selectAdminEco(element.dataset.adminUser);break;
+    case 'adminSaveEco':void saveAdminEco();break;
+    case 'adminAskResetNick':askAdminConfirm('reset',element.dataset.adminUser);break;
+    case 'adminAskDelete':askAdminConfirm('delete',element.dataset.adminUser);break;
+    case 'adminExecuteConfirm':void executeAdminConfirm();break;
+    case 'adminCancelConfirm':APP_STATE.adminConfirm=null;renderAll();break;
+    case 'adminPrevious':if(APP_STATE.adminPage>0){APP_STATE.adminPage--;void loadAdminPlayers();}break;
+    case 'adminNext':if((APP_STATE.adminPage+1)*APP_STATE.adminPageSize<APP_STATE.adminTotalPlayers){APP_STATE.adminPage++;void loadAdminPlayers();}break;
     case 'flip': APP_STATE.flipped=!APP_STATE.flipped;renderAll();haptic();break;
     case 'learn':completeLesson();break;
-    case 'refreshCloud':if(!cloudProfileChecked){void initializeCloud();}void refreshCloudRanking();break;
+    case 'refreshCloud':if(!cloudProfileChecked){void startCloudInitialization();}void refreshCloudRanking();break;
     case 'speak':{
       const lang=element.dataset.speakLang;
       const text=element.dataset.speakSource==='search' ? APP_STATE.searchResult?.versions?.[lang]?.title : getCurrentTerm()?.[lang];
@@ -4057,8 +4764,8 @@ function handleAction(action,element) {
     case 'closeSearch':closeEncyclopedia();break;
     case 'toggleFavorite':toggleFavorite();break;
     case 'editNick':case 'editCountry':openEditProfile();break;
-    case 'saveProfile':saveProfile();break;
-    case 'cancelModal':APP_STATE.modalMode=null;renderAll();break;
+    case 'saveProfile':void saveProfile();break;
+    case 'cancelModal':APP_STATE.nicknameCheckSerial++;APP_STATE.nicknameChecking=false;APP_STATE.nicknameErrorKey=null;APP_STATE.modalMode=null;renderAll();break;
     case 'resetProgress':APP_STATE.modalMode='reset';renderAll();break;
     case 'confirmReset':resetLearning();break;
     case 'openFavorite':openFavorite(Number(element.dataset.favorite));break;
@@ -4076,10 +4783,30 @@ function handleAction(action,element) {
 }
 
 document.addEventListener('input',event=>{
-  if(event.target?.id==='nicknameInput')APP_STATE.draftNickname=event.target.value;
+  if(event.target?.id==='nicknameInput'){
+    APP_STATE.draftNickname=event.target.value;
+    if(APP_STATE.nicknameErrorKey){
+      APP_STATE.nicknameErrorKey=null;
+      document.getElementById('nicknameError')?.remove();
+      event.target.setAttribute('aria-invalid','false');
+    }
+  }
   if(event.target?.id==='wikiQuery')APP_STATE.searchQuery=event.target.value;
+  if(event.target?.id==='adminPinField'){
+    APP_STATE.adminPINInput=event.target.value;
+    if(APP_STATE.adminPINErrorKey){APP_STATE.adminPINErrorKey=null;document.querySelector('.admin-message[role="alert"]')?.remove();}
+  }
+  if(event.target?.id==='adminAnnouncementText')APP_STATE.adminNoticeText=event.target.value;
+  if(event.target?.id==='adminEcoInput')APP_STATE.adminEcoInput=event.target.value;
+});
+document.addEventListener('change',event=>{
+  if(event.target?.id==='adminAnnouncementActive')APP_STATE.adminNoticeActive=Boolean(event.target.checked);
 });
 document.addEventListener('submit',event=>{
+  if(event.target?.id==='adminPinForm'){
+    event.preventDefault();APP_STATE.adminPINInput=document.getElementById('adminPinField')?.value||'';
+    void verifyAdmin();return;
+  }
   if(event.target?.id==='wikiSearchForm'){
     event.preventDefault();runEncyclopediaSearch();
   }
@@ -4087,10 +4814,14 @@ document.addEventListener('submit',event=>{
 document.addEventListener('click',event=>{
   const button=event.target.closest('button,[data-action="flip"]');
   if(!button)return;
+  if(button.dataset.adminTab){chooseAdminTab(button.dataset.adminTab);return;}
   if(button.dataset.language){changeLanguage(button.dataset.language);return;}
   if(button.dataset.country){
     const input=document.getElementById('nicknameInput');if(input)APP_STATE.draftNickname=input.value;
-    APP_STATE.draftCountry=button.dataset.country;renderAll();return;
+    if(APP_STATE.nicknameChecking)return;
+    APP_STATE.draftCountry=button.dataset.country;
+    APP_STATE.nicknameErrorKey=null;
+    renderAll();return;
   }
   if(button.dataset.tab){switchTab(button.dataset.tab);return;}
   if(button.dataset.level){chooseLevel(button.dataset.level);return;}
@@ -4111,21 +4842,24 @@ document.addEventListener('keydown',event=>{
     event.preventDefault();APP_STATE.flipped=!APP_STATE.flipped;renderAll();
   }
   if(event.key==='Escape'&&APP_STATE.modalMode&&APP_STATE.modalMode!=='onboarding'){
-    APP_STATE.modalMode=null;renderAll();
+    APP_STATE.nicknameCheckSerial++;APP_STATE.nicknameChecking=false;APP_STATE.nicknameErrorKey=null;
+    if(['admin','admin-pin'].includes(APP_STATE.modalMode))closeAdmin();
+    else {APP_STATE.modalMode=null;renderAll();}
   }
 });
 document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden){renderAll();if(!cloudProfileChecked)void initializeCloud();else if(localDirty)scheduleCloudSave();}
+  if(!document.hidden){renderAll();if(!cloudProfileChecked)void startCloudInitialization();else if(localDirty)scheduleCloudSave();}
 });
 window.addEventListener('online',()=>{
-  if(!cloudProfileChecked){void initializeCloud();return;}
+  if(!cloudProfileChecked){void startCloudInitialization();return;}
   if(localDirty)scheduleCloudSave();
   if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
 });
 window.addEventListener('offline',()=>setCloudStatus('offline'));
 window.addEventListener('pageshow',()=>renderAll());
 renderAll();
-void initializeCloud();
+void loadPublicAnnouncement();
+void startCloudInitialization();
 
   </script>
 </body>
