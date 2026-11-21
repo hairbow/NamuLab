@@ -262,14 +262,10 @@
     .wiki-save-btn { display:inline-flex;align-items:center;justify-content:center;flex:none;max-width:160px;min-height:34px;padding:7px 10px;border-radius:11px;border:1px solid #b9fda44d;background:#c4ff8514;color:#d9ffb7;font-size:11px;font-weight:800;line-height:1.2;overflow-wrap:anywhere; }
     .wiki-save-btn:active { transform:scale(.98); }
     .wiki-result-actions { flex-shrink:0; }
-    .share-preview { display:block; width:auto; max-width:100%; max-height:min(58dvh,640px); aspect-ratio:3/4; margin:0 auto; border:1px solid #b6ff9e50; border-radius:17px; object-fit:contain; background:#061a14; -webkit-touch-callout:default; -webkit-user-select:auto; user-select:auto; }
-    .share-modal { width:min(100%,445px); padding:19px; }
-    .share-buttons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
-    .share-buttons button { min-width:0; padding:13px 7px; font-size:12px; overflow-wrap:anywhere; }
     .toast { max-width:calc(100vw - 30px); white-space:normal; text-align:center; overflow-wrap:anywhere; }
     .mini-number { white-space:nowrap; font-variant-numeric:tabular-nums; }
     .break-words { overflow-wrap:anywhere; }
-    @media (max-width:380px) { .mode-switch button { font-size:10px; padding:10px 2px; } .case-picker-btn { padding:9px; font-size:11px; } .share-modal { padding:14px; } .share-buttons button { font-size:11px; } }
+    @media (max-width:380px) { .mode-switch button { font-size:10px; padding:10px 2px; } .case-picker-btn { padding:9px; font-size:11px; } }
     /* Admin extension: same emerald glass surfaces; no changes to existing components. */
     .announcement-banner {display:flex;align-items:flex-start;gap:10px;border:1px solid #d9c98365;border-radius:16px;padding:12px 13px;background:linear-gradient(120deg,#194b36dc,#21361cc8);box-shadow:inset 0 1px #fff2,0 8px 20px #0003;color:#f6eaba;overflow-wrap:anywhere;}
     .announcement-copy {min-width:0;flex:1;white-space:pre-wrap;font-size:12px;font-weight:700;line-height:1.6;overflow-wrap:anywhere;}
@@ -2489,33 +2485,7 @@ const RELEASE_UI = {
     "caseReady": "Выбери один из кейсов выше.",
     "caseNoRewards": "Без повторной награды",
     "backToCourse": "Вернуться к курсу",
-    "shareProgress": "📸 Поделиться прогрессом",
-    "shareModalTitle": "Карточка достижений",
-    "shareSubtitle": "Твой прогресс NamuLab в одном изображении",
-    "shareDownload": "⬇️ Скачать PNG",
-    "shareSend": "📤 Поделиться",
-    "shareHoldImage": "Зажмите картинку выше, чтобы сохранить её на устройство.",
-    "shareClose": "Закрыть",
-    "shareCopied": "Скопировано!",
-    "shareUnable": "Не удалось поделиться автоматически. Попробуй скачать PNG.",
-    "shareFailed": "Не удалось создать карточку. Попробуй ещё раз.",
-    "shareSaved": "Карточка PNG подготовлена.",
-    "shareCopyFailed": "Автоматическое копирование недоступно. Скопируй текст ниже:",
-    "shareTagline": "Учись сегодня — меняй завтра",
-    "shareCourse": "Подготовка по биологии и биоинженерии",
-    "rankBeginner": "Новичок",
-    "rankAssistant": "Лаборант",
-    "rankJunior": "Младший биоинженер",
-    "rankResearcher": "Исследователь",
-    "shareReady": "Готовность к экзамену",
-    "shareLearned": "Изучено терминов",
-    "shareCases": "Решено био-кейсов",
-    "shareStreak": "Стрик дней",
-    "shareEco": "Баланс ECO",
-    "shareCountry": "Страна",
     "readinessFormula": "Готовность: 45% — освоенные термины, 30% — точность тестов, 25% — решённые био-кейсы.",
-    "shareTextTitle": "Мой прогресс в NamuLab",
-    "sharePreview": "Предпросмотр карточки достижений"
   },
   "en": {
     "modeCases": "🧬 Lab cases",
@@ -2543,33 +2513,7 @@ const RELEASE_UI = {
     "caseReady": "Choose a case above.",
     "caseNoRewards": "No repeat reward",
     "backToCourse": "Back to the course",
-    "shareProgress": "📸 Share progress",
-    "shareModalTitle": "Achievement card",
-    "shareSubtitle": "Your NamuLab journey in one image",
-    "shareDownload": "⬇️ Download PNG",
-    "shareSend": "📤 Share",
-    "shareHoldImage": "Touch and hold the picture above to save it to your device.",
-    "shareClose": "Close",
-    "shareCopied": "Copied!",
-    "shareUnable": "Sharing is unavailable here. Try downloading the PNG.",
-    "shareFailed": "Could not generate the card. Please retry.",
-    "shareSaved": "PNG achievement card is ready.",
-    "shareCopyFailed": "Automatic copying is unavailable. Copy the text below:",
-    "shareTagline": "Learn today. Shape tomorrow.",
-    "shareCourse": "Biology & Bioengineering Exam Prep",
-    "rankBeginner": "Beginner",
-    "rankAssistant": "Lab assistant",
-    "rankJunior": "Junior bioengineer",
-    "rankResearcher": "Researcher",
-    "shareReady": "Exam readiness",
-    "shareLearned": "Terms learned",
-    "shareCases": "Lab cases solved",
-    "shareStreak": "Day streak",
-    "shareEco": "ECO balance",
-    "shareCountry": "Country",
     "readinessFormula": "Readiness: 45% learned terms, 30% test accuracy, 25% solved lab cases.",
-    "shareTextTitle": "My NamuLab progress",
-    "sharePreview": "Achievement card preview"
   },
   "ko": {
     "modeCases": "🧬 생명과학 사례",
@@ -2597,33 +2541,7 @@ const RELEASE_UI = {
     "caseReady": "위에서 풀고 싶은 사례를 선택해 주세요.",
     "caseNoRewards": "추가 보상 없음",
     "backToCourse": "학습으로 돌아가기",
-    "shareProgress": "📸 학습 성과 공유하기",
-    "shareModalTitle": "학습 성과 카드",
-    "shareSubtitle": "지금까지의 NamuLab 기록을 한 장에 담았어요.",
-    "shareDownload": "⬇️ PNG 저장",
-    "shareSend": "📤 공유하기",
-    "shareHoldImage": "위 이미지를 길게 눌러 기기에 저장해 주세요.",
-    "shareClose": "닫기",
-    "shareCopied": "복사했어요!",
-    "shareUnable": "이 환경에서는 바로 공유할 수 없어요. PNG를 저장해 보세요.",
-    "shareFailed": "성과 카드를 만들지 못했어요. 다시 시도해 주세요.",
-    "shareSaved": "PNG 성과 카드가 준비됐어요.",
-    "shareCopyFailed": "자동 복사가 어려워요. 아래 내용을 직접 복사해 주세요:",
-    "shareTagline": "오늘 배우고, 내일을 바꿔요",
-    "shareCourse": "생명과학·생명공학 시험 대비",
-    "rankBeginner": "입문자",
-    "rankAssistant": "실험실 연구보조원",
-    "rankJunior": "주니어 생명공학자",
-    "rankResearcher": "연구자",
-    "shareReady": "시험 준비도",
-    "shareLearned": "학습한 용어",
-    "shareCases": "해결한 사례",
-    "shareStreak": "연속 학습일",
-    "shareEco": "ECO 잔액",
-    "shareCountry": "국가",
     "readinessFormula": "시험 준비도는 용어 학습 45%, 시험 정답률 30%, 해결한 사례 25%로 계산해요.",
-    "shareTextTitle": "나의 NamuLab 학습 기록",
-    "sharePreview": "학습 성과 카드 미리보기"
   }
 };
 for (const lang of ['ru','en','ko']) { Object.assign(UI[lang],RELEASE_UI[lang]); UI[lang].examReadinessTip=UI[lang].readinessFormula; }
@@ -2901,7 +2819,7 @@ const APP_STATE = Object.assign(loadState(),{
   flipped:false,modalMode:null,draftCountry:null,draftNickname:'',
   nicknameChecking:false,nicknameErrorKey:null,nicknameErrorDetail:null,nicknameCheckSerial:0,searchQuery:'',
   searchResult:null,searchLoading:false,searchErrorKey:null,searchSuggestions:[],requestSerial:0,
-  requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',shareSaveHint:false,
+  requestController:null,focusTermId:null,
   cloudStatus: sbClient ? 'connecting' : 'offline',cloudPlayers:[],
   cloudTotals:{KZ:0,KR:0,US:0},cloudTotalsAvailable:false,
   cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null,
@@ -3004,12 +2922,6 @@ function getExamReadiness() {
   const solved=Math.min(1,APP_STATE.solvedCaseIds.length/LAB_CASES_DB.length);
   return Math.round(100*(.45*learned+.30*accuracy+.25*solved));
 }
-function getAchievementTitle() {
-  const readiness=getExamReadiness();
-  return t(readiness>=75?'rankResearcher':readiness>=50?'rankJunior':readiness>=25?'rankAssistant':'rankBeginner');
-}
-
-
 function icon(name, size=20) {
   const paths = {
     cards:'<rect x="3" y="4" width="13" height="16" rx="2"/><path d="M8 8h4M8 12h4M19 8h2v12a2 2 0 0 1-2 2H9"/>',
@@ -3409,7 +3321,6 @@ function renderProfile() {
       <div class="muted text-xs mt-2">${t('examReview')}: ${APP_STATE.weakTermIds.length}</div>
       <div class="muted text-xs mt-2">🧬 ${t('caseProgress')}: <strong>${APP_STATE.solvedCaseIds.length}/${LAB_CASES_DB.length}</strong></div>
     </div>
-    <button type="button" class="primary-btn mt-5" data-action="shareProgress">${t('shareProgress')}</button>
     <div class="grid grid-cols-2 gap-3 mt-6">
       <button data-action="editNick" class="secondary-btn flex flex-col items-center justify-center gap-2 text-sm">${icon('edit')}${t('editNick')}</button>
       <button data-action="editCountry" class="secondary-btn flex flex-col items-center justify-center gap-2 text-sm">${icon('globe')}${t('changeCountry')}</button>
@@ -3513,16 +3424,6 @@ function renderModal() {
   }
   if(APP_STATE.modalMode==='admin'){
     paintIfChanged(root, renderAdminPanel());
-    return;
-  }
-  if (APP_STATE.modalMode === 'share') {
-    paintIfChanged(root, `<div class="modal-overlay" data-modal-overlay><div class="modal-panel share-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-      <div class="flex items-start justify-between gap-3 mb-3"><div class="min-w-0"><h2 id="modalTitle" class="text-xl font-extrabold break-words">${t('shareModalTitle')}</h2><p class="text-xs muted mt-1">${t('shareSubtitle')}</p></div><button type="button" class="subtle-icon-btn" data-action="cancelModal" aria-label="${t('shareClose')}">${icon('close',18)}</button></div>
-      ${APP_STATE.shareImage?`<img class="share-preview" src="${APP_STATE.shareImage}" alt="${esc(t('sharePreview'))}"/>`:`<div class="text-center muted p-6">${t('searching')}</div>`}
-      <div class="share-buttons mt-3"><button class="secondary-btn" type="button" data-action="downloadShare">${t('shareDownload')}</button><button class="primary-btn" type="button" data-action="sendShare">${t('shareSend')}</button></div>
-      ${APP_STATE.shareSaveHint?`<p class="muted text-xs leading-5 mt-3 text-center break-words" role="status">${t('shareHoldImage')}</p>`:''}
-      ${APP_STATE.shareFallbackText?`<textarea class="input-text mt-3 text-xs" readonly rows="5" aria-label="${t('shareTextTitle')}">${esc(APP_STATE.shareFallbackText)}</textarea>`:''}
-    </div></div>`);
     return;
   }
   if (APP_STATE.modalMode === 'reset') {
@@ -3895,11 +3796,17 @@ function completeLesson() {
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
 function speak(text, lang) {
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = lang === 'ko' ? 'ko-KR' : 'en-US';
-  u.rate = 0.9;
-  window.speechSynthesis.speak(u);
+  const audio = new Audio();
+  audio.referrerPolicy = 'no-referrer';
+  audio.src = lang === 'ko'
+    ? 'https://translate.google.com/translate_tts?ie=UTF-8&tl=ko&client=tw-ob&q=' + encodeURIComponent(text)
+    : 'https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=' + encodeURIComponent(text);
+  if (window.currentAudio) {
+    window.currentAudio.pause();
+  }
+  window.currentAudio = audio;
+  const playback = audio.play();
+  if (playback && typeof playback.catch === 'function') playback.catch(() => {});
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
@@ -4067,184 +3974,6 @@ function closeEncyclopedia() {
   APP_STATE.searchResult=null;APP_STATE.searchLoading=false;
   APP_STATE.searchErrorKey=null;APP_STATE.searchSuggestions=[];
   renderAll();
-}
-// Share Card: a 720x960 Canvas, rasterized at 2x or higher for crisp PNG export.
-// No remote images are loaded, so canvas stays origin-clean even inside Telegram.
-function buildShareText() {
-  const c=APP_STATE.country||'—';
-  return `${t('shareTextTitle')} 🌿
-NamuLab • Bioengineering Exam Prep
-${c} ${escText(APP_STATE.nickname)}
-${getAchievementTitle()}
-🎓 ${t('shareReady')}: ${getExamReadiness()}%
-📚 ${t('shareLearned')}: ${APP_STATE.learnedIds.length}/${TERMS_DB.length}
-🧬 ${t('shareCases')}: ${APP_STATE.solvedCaseIds.length}/${LAB_CASES_DB.length}
-🔥 ${t('shareStreak')}: ${effectiveStreak()}
-🌱 ${t('shareEco')}: ${APP_STATE.eco} ECO`;
-}
-function escText(value) { return String(value??'').replace(/[\r\n\t]+/g,' ').trim(); }
-function roundedPath(ctx,x,y,w,h,r) {
-  const v=Math.min(r,w/2,h/2);
-  ctx.beginPath();ctx.moveTo(x+v,y);ctx.lineTo(x+w-v,y);ctx.quadraticCurveTo(x+w,y,x+w,y+v);ctx.lineTo(x+w,y+h-v);ctx.quadraticCurveTo(x+w,y+h,x+w-v,y+h);ctx.lineTo(x+v,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-v);ctx.lineTo(x,y+v);ctx.quadraticCurveTo(x,y,x+v,y);ctx.closePath();
-}
-function shareFitText(ctx,value,maxWidth,startSize,minSize=17) {
-  let size=startSize;
-  while(size>minSize){ctx.font=`800 ${size}px Manrope, 'Noto Sans KR', sans-serif`;if(ctx.measureText(value).width<=maxWidth)break;size-=1;}
-  ctx.font=`800 ${size}px Manrope, 'Noto Sans KR', sans-serif`;
-  let output=value;
-  if(ctx.measureText(output).width>maxWidth){while(output.length>1&&ctx.measureText(output+'…').width>maxWidth)output=output.slice(0,-1);output+='…';}
-  return output;
-}
-function drawCanvasFlag(ctx,code,x,y,w,h) {
-  // Canvas flags are vector-drawn, so their rendering never depends on emoji fonts.
-  ctx.save();roundedPath(ctx,x,y,w,h,4);ctx.clip();
-  if(code==='KZ'){
-    ctx.fillStyle='#00AFC8';ctx.fillRect(x,y,w,h);
-    ctx.fillStyle='#F7CB42';ctx.fillRect(x+3,y,2,h);
-    ctx.beginPath();ctx.arc(x+w*.54,y+h*.42,h*.16,0,Math.PI*2);ctx.fill();
-    ctx.strokeStyle='#F7CB42';ctx.lineWidth=1.2;
-    for(let i=0;i<8;i++){const a=i*Math.PI/4;ctx.beginPath();ctx.moveTo(x+w*.54+Math.cos(a)*h*.21,y+h*.42+Math.sin(a)*h*.21);ctx.lineTo(x+w*.54+Math.cos(a)*h*.28,y+h*.42+Math.sin(a)*h*.28);ctx.stroke();}
-    ctx.beginPath();ctx.moveTo(x+w*.26,y+h*.72);ctx.quadraticCurveTo(x+w*.5,y+h*.92,x+w*.8,y+h*.72);ctx.quadraticCurveTo(x+w*.53,y+h*.97,x+w*.26,y+h*.72);ctx.fill();
-  } else if(code==='KR'){
-    ctx.fillStyle='#fff';ctx.fillRect(x,y,w,h);
-    ctx.fillStyle='#CD2E3A';ctx.beginPath();ctx.arc(x+w/2,y+h/2,h*.26,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='#0047A0';ctx.beginPath();ctx.arc(x+w/2,y+h/2,h*.26,0,Math.PI);ctx.fill();
-    ctx.strokeStyle='#111';ctx.lineWidth=1.5;
-    for(const [cx,cy,dir] of [[.18,.23,1],[.82,.77,1],[.82,.23,-1],[.18,.77,-1]]){
-      for(let j=-1;j<=1;j++){ctx.beginPath();ctx.moveTo(x+w*cx+j*2.5,y+h*cy-3*dir);ctx.lineTo(x+w*cx+j*2.5+5,y+h*cy+3*dir);ctx.stroke();}
-    }
-  } else if(code==='US'){
-    ctx.fillStyle='#fff';ctx.fillRect(x,y,w,h);ctx.fillStyle='#B22234';
-    for(let i=0;i<7;i++)ctx.fillRect(x,y+i*h/6.5,w,h/13);
-    ctx.fillStyle='#3C3B6E';ctx.fillRect(x,y,w*.42,h*.54);
-    ctx.fillStyle='#fff';for(let r=0;r<4;r++)for(let c=0;c<5;c++){ctx.beginPath();ctx.arc(x+3+c*w*.072,y+2+r*h*.115,.8,0,Math.PI*2);ctx.fill();}
-  } else{ctx.fillStyle='#184e39';ctx.fillRect(x,y,w,h);}
-  ctx.restore();
-}
-function createShareCard() {
-  const canvas=document.createElement('canvas');
-  const ratio=Math.max(2,window.devicePixelRatio||1);
-  canvas.width=Math.round(720*ratio);canvas.height=Math.round(960*ratio);
-  const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Canvas rendering unavailable');
-  ctx.scale(ratio,ratio);
-  const bg=ctx.createLinearGradient(0,0,720,960);bg.addColorStop(0,'#092b23');bg.addColorStop(.48,'#061a14');bg.addColorStop(1,'#03100d');
-  ctx.fillStyle=bg;ctx.fillRect(0,0,720,960);
-  const glow=ctx.createRadialGradient(650,130,10,650,130,490);glow.addColorStop(0,'#236d4c');glow.addColorStop(1,'#236d4c00');ctx.fillStyle=glow;ctx.fillRect(0,0,720,630);
-  ctx.strokeStyle='#a9f8ab22';ctx.lineWidth=2;for(let i=0;i<3;i++){ctx.beginPath();ctx.arc(670,155,130+i*41,0,Math.PI*2);ctx.stroke();}
-  roundedPath(ctx,24,24,672,912,33);ctx.strokeStyle='#aaff8a55';ctx.lineWidth=2;ctx.stroke();
-  ctx.save();ctx.translate(79,78);ctx.strokeStyle='#c7ff89';ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(0,30);ctx.quadraticCurveTo(17,-10,53,-20);ctx.quadraticCurveTo(55,21,27,38);ctx.quadraticCurveTo(7,45,0,30);ctx.stroke();ctx.beginPath();ctx.moveTo(-4,51);ctx.quadraticCurveTo(18,17,44,0);ctx.stroke();ctx.restore();
-  ctx.textAlign='left';ctx.fillStyle='#f2fff4';ctx.font='800 52px Manrope, sans-serif';ctx.fillText('Namu',152,96);const labX=152+ctx.measureText('Namu').width;ctx.fillStyle='#baff83';ctx.fillText('Lab',labX,96);
-  ctx.fillStyle='#9ccbb0';ctx.font="600 19px 'Noto Sans KR', 'DM Sans', sans-serif";ctx.fillText(t('shareTagline'),74,139);
-  ctx.fillStyle='#bfff87';ctx.font="800 17px 'Noto Sans KR', 'DM Sans', sans-serif";ctx.fillText('BIOLOGY  /  EXAM PREP',74,191);
-  roundedPath(ctx,74,214,572,173,22);ctx.fillStyle='#ffffff0e';ctx.fill();ctx.strokeStyle='#b4f99a31';ctx.stroke();
-  roundedPath(ctx,92,236,163,59,14);ctx.fillStyle='#174a38';ctx.fill();ctx.strokeStyle='#baff8350';ctx.stroke();
-  drawCanvasFlag(ctx,APP_STATE.country,106,250,43,30);
-  ctx.font="800 22px 'Noto Sans KR', 'DM Sans',sans-serif";ctx.fillStyle='#bff48f';ctx.fillText(APP_STATE.country||'—',170,274);
-  ctx.fillStyle='#f1fff1';ctx.fillText(shareFitText(ctx,APP_STATE.nickname||t('noName'),460,44,23),94,335);
-  ctx.fillStyle='#9ccdb0';ctx.font="700 19px 'Noto Sans KR', 'DM Sans',sans-serif";ctx.fillText(getAchievementTitle(),94,369);
-  ctx.fillStyle='#d5ffe6';ctx.font="800 20px 'Noto Sans KR', 'DM Sans',sans-serif";ctx.fillText(t('shareReady'),74,446);
-  ctx.fillStyle='#c4ff80';ctx.textAlign='right';ctx.font='800 54px Manrope,sans-serif';ctx.fillText(`${getExamReadiness()}%`,641,453);ctx.textAlign='left';
-  roundedPath(ctx,74,475,572,15,8);ctx.fillStyle='#ffffff22';ctx.fill();
-  if(getExamReadiness()>0){roundedPath(ctx,74,475,Math.max(12,572*getExamReadiness()/100),15,8);const line=ctx.createLinearGradient(74,0,646,0);line.addColorStop(0,'#67d6a0');line.addColorStop(1,'#c0ff75');ctx.fillStyle=line;ctx.fill();}
-  const stats=[
-    ['📚',t('shareLearned'),`${APP_STATE.learnedIds.length} / ${TERMS_DB.length}`],
-    ['🧬',t('shareCases'),`${APP_STATE.solvedCaseIds.length} / ${LAB_CASES_DB.length}`],
-    ['🔥',t('shareStreak'),String(effectiveStreak())],
-    ['🌱',t('shareEco'),`${localeNumber(APP_STATE.eco)} ECO`]
-  ];
-  stats.forEach(([symbol,label,value],index)=>{
-    const x=74+(index%2)*291,y=531+Math.floor(index/2)*137;
-    roundedPath(ctx,x,y,277,124,19);ctx.fillStyle='#15392d';ctx.fill();ctx.strokeStyle='#ffffff23';ctx.lineWidth=1;ctx.stroke();
-    ctx.font='25px "Noto Color Emoji", "Segoe UI Emoji",sans-serif';ctx.fillStyle='#fff';ctx.fillText(symbol,x+18,y+34);
-    ctx.fillStyle='#a5c9b3';ctx.font="600 16px 'Noto Sans KR', 'DM Sans',sans-serif";
-    ctx.fillText(shareFitText(ctx,label,241,18,14),x+18,y+65);
-    ctx.fillStyle='#ebffda';ctx.font='800 29px Manrope,sans-serif';ctx.fillText(shareFitText(ctx,value,240,29,22),x+18,y+104);
-  });
-  ctx.strokeStyle='#c8ff8a35';ctx.beginPath();ctx.moveTo(74,842);ctx.lineTo(646,842);ctx.stroke();
-  ctx.textAlign='center';ctx.fillStyle='#d5f7d9';ctx.font='700 20px Manrope, sans-serif';ctx.fillText('NamuLab • Bioengineering Exam Prep',360,882);
-  return canvas;
-}
-async function openShareProgress() {
-  try {
-    if(document.fonts && document.fonts.ready)await document.fonts.ready;
-    const canvas=createShareCard();
-    APP_STATE.shareCanvas=canvas;
-    // An ordinary <img src="data:image/png;base64,..."> is rendered in the
-    // modal so long-press / right-click saving also works without <a download>.
-    APP_STATE.shareImage=canvas.toDataURL('image/png');
-    APP_STATE.shareFallbackText='';
-    APP_STATE.shareSaveHint=false;
-    APP_STATE.modalMode='share';
-    renderAll();haptic();
-  }catch(error){console.warn('Share image unavailable',error);toast(t('shareFailed'));}
-}
-function shareCardFile() {
-  // Synchronous conversion keeps the browser's user gesture available
-  // for navigator.share() inside Telegram and mobile browsers.
-  if(typeof File!=='function' || typeof atob!=='function')return null;
-  const dataUrl=APP_STATE.shareImage || (APP_STATE.shareCanvas||createShareCard()).toDataURL('image/png');
-  const encoded=dataUrl.split(',')[1];
-  if(!encoded)throw new Error('PNG data is missing');
-  const binary=atob(encoded);
-  const bytes=new Uint8Array(binary.length);
-  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
-  return new File([bytes],'NamuLab_Progress.png',{type:'image/png'});
-}
-function canSharePng(file) {
-  if(!file || typeof navigator.share!=='function')return false;
-  try {return typeof navigator.canShare!=='function' || navigator.canShare({files:[file]});}
-  catch(error){console.info('File sharing check unavailable',error);return false;}
-}
-function showShareSaveHint() {
-  APP_STATE.shareSaveHint=true;
-  renderAll();
-}
-async function downloadShareCard() {
-  // Telegram WebView often ignores <a download>, so prefer the OS share sheet.
-  // The already rendered <img> remains available for manual long-press saving.
-  try {
-    const file=shareCardFile();
-    if(canSharePng(file)) {
-      try {
-        await navigator.share({files:[file],title:'NamuLab'});
-        return;
-      }catch(error){
-        if(error?.name==='AbortError')return;
-        console.info('Native PNG save/share unavailable',error);
-      }
-    }
-  }catch(error){console.info('PNG file conversion unavailable',error);}
-  showShareSaveHint();
-}
-function openTelegramProgressShare(report) {
-  const link='https://t.me/share/url?url='+encodeURIComponent('https://t.me/NamuLab_bot')+'&text='+encodeURIComponent(report);
-  try {
-    const tg=window.Telegram?.WebApp;
-    if(typeof tg?.openTelegramLink==='function') {
-      tg.openTelegramLink(link);
-      return;
-    }
-  }catch(error){console.info('Telegram share link unavailable in WebApp',error);}
-  // In a normal desktop browser open the Telegram forwarding URL directly.
-  const newWindow=window.open(link,'_blank','noopener,noreferrer');
-  if(!newWindow)window.location.href=link;
-}
-function sendShareCard() {
-  const report=buildShareText();
-  try {
-    const file=shareCardFile();
-    if(canSharePng(file)) {
-      // Call navigator.share immediately from the button click.
-      navigator.share({files:[file],text:report,title:'NamuLab'}).catch(error=>{
-        if(error?.name!=='AbortError'){
-          console.info('Native image share unavailable',error);
-          openTelegramProgressShare(report);
-        }
-      });
-      return;
-    }
-  }catch(error){console.info('PNG share unavailable',error);}
-  openTelegramProgressShare(report);
 }
 // ================================================================
 // Cloud sync. All visual output still comes from APP_STATE/renderAll().
@@ -4771,9 +4500,6 @@ function handleAction(action,element) {
     case 'openFavorite':openFavorite(Number(element.dataset.favorite));break;
     case 'deleteFavorite':deleteFavorite(Number(element.dataset.favorite));break;
     case 'goProfile':switchTab('profile');break;
-    case 'shareProgress':openShareProgress();break;
-    case 'downloadShare':downloadShareCard();break;
-    case 'sendShare':sendShareCard();break;
     case 'retryCase':retryCase();break;
     case 'studyRelated':studyRelatedTerm(element.dataset.termId);break;
     case 'releaseFocus':APP_STATE.focusTermId=null;renderAll();break;
