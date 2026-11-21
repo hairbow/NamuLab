@@ -3796,69 +3796,131 @@ function completeLesson() {
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
 function speak(text, lang) {
-  if (!text) return;
+  // A fresh tap must cancel BOTH an earlier recording and any pending fallback.
+  const phrase = String(text == null ? '' : text).trim();
+  if (!phrase) return;
 
-  try {
-    if (window.currentAudio) {
-      window.currentAudio.pause();
-      window.currentAudio.onerror = null;
-      window.currentAudio.onplaying = null;
-    }
+  const language = String(lang).toLowerCase().startsWith('ko') ? 'ko' : 'en';
+  const requestId = (window.namuSpeechRequestId || 0) + 1;
+  window.namuSpeechRequestId = requestId;
 
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
+  if (typeof window.namuSpeechStop === 'function') {
+    try { window.namuSpeechStop(); } catch (error) { console.debug('TTS cleanup:', error); }
+  }
+  if (window.currentAudio) {
+    try { window.currentAudio.pause(); } catch (error) { /* already stopped */ }
+    window.currentAudio = null;
+  }
+  if ('speechSynthesis' in window) {
+    try { window.speechSynthesis.cancel(); } catch (error) { /* no active speech */ }
+  }
 
-    const voice = lang === 'ko' ? 'Seoyeon' : 'Brian';
-    const audio = new Audio(
-      'https://api.streamelements.com/kappa/v2/speech?voice=' +
-      voice + '&text=' + encodeURIComponent(text)
-    );
-    window.currentAudio = audio;
+  // Direct Audio playback does not require fetch(), CORS headers, or any API key.
+  // The public endpoints may change; use two independent hostnames before
+  // falling back to the browser voice if one becomes unavailable.
+  const query = encodeURIComponent(phrase);
+  const urls = [
+    'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + language + '&q=' + query,
+    'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=' + language + '&q=' + query
+  ];
 
-    let fallbackStarted = false;
-    let timeoutId = null;
+  let sourceIndex = 0;
+  let timeoutId = null;
+  let activeAudio = null;
+  let cancelled = false;
 
-    const fallback = () => {
-      if (fallbackStarted || window.currentAudio !== audio) return;
-      fallbackStarted = true;
+  const clearAttempt = () => {
+    if (timeoutId !== null) {
       clearTimeout(timeoutId);
-      audio.onerror = null;
-      audio.onplaying = null;
-      audio.pause();
+      timeoutId = null;
+    }
+    if (activeAudio) {
+      activeAudio.onerror = null;
+      activeAudio.onplaying = null;
+      activeAudio.onended = null;
+      activeAudio.onwaiting = null;
+      activeAudio.pause();
+      activeAudio = null;
+    }
+  };
+  window.namuSpeechStop = () => {
+    cancelled = true;
+    clearAttempt();
+    if ('speechSynthesis' in window) {
+      try { window.speechSynthesis.cancel(); } catch (error) { /* ignore */ }
+    }
+  };
+  const isCurrent = () => !cancelled && requestId === window.namuSpeechRequestId;
 
-      try {
-        if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') return;
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = lang === 'ko' ? 'ko-KR' : 'en-US';
-        window.speechSynthesis.speak(u);
-      } catch (error) {
-        console.error('Speech synthesis fallback:', error);
-      }
+  const browserFallback = () => {
+    if (!isCurrent()) return;
+    clearAttempt();
+    try {
+      if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
+      const u = new SpeechSynthesisUtterance(phrase);
+      u.lang = language === 'ko' ? 'ko-KR' : 'en-US';
+      u.rate = 0.95;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch (error) {
+      console.warn('NamuLab TTS: browser fallback unavailable:', error);
+    }
+  };
+
+  const tryNextSource = () => {
+    if (!isCurrent()) return;
+    clearAttempt();
+    if (sourceIndex >= urls.length) {
+      browserFallback();
+      return;
+    }
+
+    const url = urls[sourceIndex++];
+    const audio = new Audio();
+    activeAudio = audio;
+    window.currentAudio = audio;
+    audio.preload = 'auto';
+    audio.referrerPolicy = 'no-referrer';
+    audio.playsInline = true;
+    let started = false;
+    let failed = false;
+
+    const fail = (reason) => {
+      if (!isCurrent() || failed || started) return;
+      failed = true;
+      console.warn('NamuLab TTS: audio provider unavailable:', reason || url);
+      tryNextSource();
     };
-
     audio.onplaying = () => {
-      if (window.currentAudio !== audio || fallbackStarted) {
+      if (!isCurrent()) {
         audio.pause();
         return;
       }
-      clearTimeout(timeoutId);
+      started = true;
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     };
-    audio.onended = () => clearTimeout(timeoutId);
-    audio.onerror = fallback;
-    timeoutId = setTimeout(fallback, 2000);
-
+    audio.onerror = () => fail('Audio load failed: ' + url.split('?')[0]);
+    audio.onended = () => {
+      if (window.currentAudio === audio) window.currentAudio = null;
+    };
+    // Allow enough time for Korean audio on a slower Telegram WebView.
+    // A two-second timeout was aborting perfectly valid network requests.
+    timeoutId = setTimeout(() => fail('Audio start timeout'), 6500);
+    audio.src = url;
     try {
-      const playResult = audio.play();
-      if (playResult && typeof playResult.catch === 'function') {
-        playResult.catch(fallback);
+      const startedPlayback = audio.play();
+      if (startedPlayback && typeof startedPlayback.catch === 'function') {
+        startedPlayback.catch(error => fail(error && error.message));
       }
     } catch (error) {
-      fallback();
+      fail(error && error.message);
     }
-  } catch (error) {
-    console.error('Audio initialization:', error);
-  }
+  };
+
+  tryNextSource();
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
