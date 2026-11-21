@@ -3796,131 +3796,257 @@ function completeLesson() {
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
 function speak(text, lang) {
-  // A fresh tap must cancel BOTH an earlier recording and any pending fallback.
+  // NamuLab audio: anonymous MP3 services + a persistent cache of successfully
+  // generated recordings. No Cloudflare Worker, Google Translate or StreamElements.
   const phrase = String(text == null ? '' : text).trim();
   if (!phrase) return;
+  const locale = String(lang).toLowerCase().startsWith('ko') ? 'ko' : 'en';
+  const token = (window.namuTtsToken || 0) + 1;
+  window.namuTtsToken = token;
 
-  const language = String(lang).toLowerCase().startsWith('ko') ? 'ko' : 'en';
-  const requestId = (window.namuSpeechRequestId || 0) + 1;
-  window.namuSpeechRequestId = requestId;
-
-  if (typeof window.namuSpeechStop === 'function') {
-    try { window.namuSpeechStop(); } catch (error) { console.debug('TTS cleanup:', error); }
+  if (typeof window.namuTtsCancel === 'function') {
+    try { window.namuTtsCancel(); } catch (_) {}
   }
   if (window.currentAudio) {
-    try { window.currentAudio.pause(); } catch (error) { /* already stopped */ }
+    try { window.currentAudio.pause(); window.currentAudio.currentTime = 0; } catch (_) {}
     window.currentAudio = null;
   }
   if ('speechSynthesis' in window) {
-    try { window.speechSynthesis.cancel(); } catch (error) { /* no active speech */ }
+    try { window.speechSynthesis.cancel(); } catch (_) {}
   }
 
-  // Direct Audio playback does not require fetch(), CORS headers, or any API key.
-  // The public endpoints may change; use two independent hostnames before
-  // falling back to the browser voice if one becomes unavailable.
-  const query = encodeURIComponent(phrase);
-  const urls = [
-    'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' + language + '&q=' + query,
-    'https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=' + language + '&q=' + query
-  ];
-
-  let sourceIndex = 0;
-  let timeoutId = null;
-  let activeAudio = null;
-  let cancelled = false;
-
-  const clearAttempt = () => {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-      timeoutId = null;
-    }
-    if (activeAudio) {
-      activeAudio.onerror = null;
-      activeAudio.onplaying = null;
-      activeAudio.onended = null;
-      activeAudio.onwaiting = null;
-      activeAudio.pause();
-      activeAudio = null;
-    }
+  let stopped = false;
+  let playing = false;
+  let audio = null;
+  let timer = null;
+  let controller = null;
+  let blobURL = null;
+  const live = () => !stopped && token === window.namuTtsToken;
+  const clearTimer = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
   };
-  window.namuSpeechStop = () => {
-    cancelled = true;
-    clearAttempt();
+  const cleanup = () => {
+    clearTimer();
+    if (controller) { try { controller.abort(); } catch (_) {} controller = null; }
+    if (audio) {
+      audio.onplaying = audio.onerror = audio.onended = null;
+      try { audio.pause(); } catch (_) {}
+      audio = null;
+    }
+    if (blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
+  };
+  window.namuTtsCancel = () => {
+    stopped = true;
+    cleanup();
     if ('speechSynthesis' in window) {
-      try { window.speechSynthesis.cancel(); } catch (error) { /* ignore */ }
+      try { window.speechSynthesis.cancel(); } catch (_) {}
     }
   };
-  const isCurrent = () => !cancelled && requestId === window.namuSpeechRequestId;
 
-  const browserFallback = () => {
-    if (!isCurrent()) return;
-    clearAttempt();
+  function recordToCache(blob) {
+    // An unavailable/blocked IndexedDB must never stop playback.
+    if (!blob || blob.size < 200 || !('indexedDB' in window)) return;
     try {
-      if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
-      const u = new SpeechSynthesisUtterance(phrase);
-      u.lang = language === 'ko' ? 'ko-KR' : 'en-US';
-      u.rate = 0.95;
+      const open = indexedDB.open('NamuLabAudioV1', 1);
+      open.onupgradeneeded = () => {
+        if (!open.result.objectStoreNames.contains('clips')) open.result.createObjectStore('clips');
+      };
+      open.onsuccess = () => {
+        try {
+          const db = open.result;
+          const tx = db.transaction('clips', 'readwrite');
+          tx.objectStore('clips').put(blob, locale + '|' + phrase);
+          tx.oncomplete = tx.onerror = () => db.close();
+        } catch (_) { try { open.result.close(); } catch (__) {} }
+      };
+    } catch (_) {}
+  }
+  function readFromCache() {
+    return new Promise(resolve => {
+      if (!('indexedDB' in window)) return resolve(null);
+      try {
+        const open = indexedDB.open('NamuLabAudioV1', 1);
+        open.onupgradeneeded = () => {
+          if (!open.result.objectStoreNames.contains('clips')) open.result.createObjectStore('clips');
+        };
+        open.onerror = () => resolve(null);
+        open.onsuccess = () => {
+          try {
+            const db = open.result;
+            const tx = db.transaction('clips', 'readonly');
+            const get = tx.objectStore('clips').get(locale + '|' + phrase);
+            get.onsuccess = () => resolve(get.result instanceof Blob ? get.result : null);
+            get.onerror = () => resolve(null);
+            tx.oncomplete = tx.onerror = () => db.close();
+          } catch (_) { resolve(null); }
+        };
+      } catch (_) { resolve(null); }
+    });
+  }
+  function playURL(url, milliseconds, onSuccess) {
+    return new Promise((resolve) => {
+      if (!live()) return resolve(false);
+      clearTimer();
+      if (audio) {
+        audio.onplaying = audio.onerror = audio.onended = null;
+        try { audio.pause(); } catch (_) {}
+      }
+      const el = new Audio();
+      audio = el;
+      window.currentAudio = el;
+      el.preload = 'auto';
+      let completed = false;
+      const finish = okay => {
+        if (completed) return;
+        completed = true;
+        clearTimer();
+        el.onerror = null;
+        if (!okay) { el.onplaying = null; try { el.pause(); } catch (_) {} }
+        if (live() && okay) {
+          playing = true;
+          if (typeof onSuccess === 'function') try { onSuccess(); } catch (_) {}
+        }
+        resolve(Boolean(okay && live()));
+      };
+      el.onplaying = () => finish(true);
+      el.onerror = () => finish(false);
+      el.onended = () => {
+        if (window.currentAudio === el) window.currentAudio = null;
+      };
+      timer = setTimeout(() => finish(false), milliseconds);
+      try {
+        el.src = url;
+        const promise = el.play();
+        if (promise && typeof promise.catch === 'function') promise.catch(() => finish(false));
+      } catch (_) { finish(false); }
+    });
+  }
+  async function requestJSON(url, options, milliseconds) {
+    if (!live()) throw Error('cancelled');
+    controller = new AbortController();
+    const current = controller;
+    const abortAfter = setTimeout(() => current.abort(), milliseconds);
+    try {
+      const response = await fetch(url, { ...options, signal: current.signal });
+      if (!response.ok) throw Error('TTS HTTP ' + response.status);
+      return await response.json();
+    } finally {
+      clearTimeout(abortAfter);
+      if (controller === current) controller = null;
+    }
+  }
+  async function requestAudioBlob(url, options, milliseconds) {
+    if (!live()) throw Error('cancelled');
+    controller = new AbortController();
+    const current = controller;
+    const abortAfter = setTimeout(() => current.abort(), milliseconds);
+    try {
+      const response = await fetch(url, { ...options, signal: current.signal });
+      if (!response.ok) throw Error('TTS HTTP ' + response.status);
+      const blob = await response.blob();
+      if (!blob || blob.size < 200 || (blob.type && !/audio|octet-stream/.test(blob.type))) {
+        throw Error('TTS returned no audio');
+      }
+      return blob;
+    } finally {
+      clearTimeout(abortAfter);
+      if (controller === current) controller = null;
+    }
+  }
+  async function playBlob(blob) {
+    if (!live()) return false;
+    blobURL = URL.createObjectURL(blob);
+    const ok = await playURL(blobURL, 6000);
+    if (!ok && blobURL) { URL.revokeObjectURL(blobURL); blobURL = null; }
+    return ok;
+  }
+  async function tryFreeApiPost() {
+    // FreeAPI also documents a JSON POST that returns MP3 bytes.
+    const voices = await requestJSON('https://freeapi.pro/api/voices', {}, 5000);
+    const collection = Array.isArray(voices.voices) ? voices.voices : [];
+    const prefix = locale === 'ko' ? 'ko-KR-' : 'en-US-';
+    const matching = collection.find(v => String(v.edgeVoice || '').startsWith(prefix));
+    if (!matching) throw Error('No matching cloud voice');
+    const blob = await requestAudioBlob('https://freeapi.pro/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voiceIndex: matching.index, text: phrase, rate: -8, pitch: 0 })
+    }, 11000);
+    const ok = await playBlob(blob);
+    if (ok) recordToCache(blob);
+    return ok;
+  }
+  async function tryTtsAi() {
+    // TTS.ai documents an anonymous free tier and dynamically lists KO/EN voices.
+    const result = await requestJSON('https://api.tts.ai/v1/voices/?language=' + locale, {}, 7000);
+    const voices = Array.isArray(result.voices) ? result.voices : [];
+    const matching = voices.find(v => /^(kokoro|melotts|vits|piper)$/i.test(v.model || '') &&
+      String(v.language || '').toLowerCase().startsWith(locale));
+    if (!matching) throw Error('No available voice');
+    const resultPost = await requestJSON('https://api.tts.ai/v1/tts/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: matching.model, voice: matching.id,
+        text: phrase, language: locale, format: 'mp3', speed: 0.94 })
+    }, 10000);
+    const uuid = resultPost.uuid || resultPost.job_id;
+    if (!uuid) throw Error('No TTS job ID');
+    const end = Date.now() + 15000;
+    while (live() && Date.now() < end) {
+      await new Promise(resolve => setTimeout(resolve, 1050));
+      if (!live()) return false;
+      const progress = await requestJSON('https://api.tts.ai/v1/speech/results/?uuid=' +
+        encodeURIComponent(uuid), {}, 6500);
+      if (progress.status === 'failed') return false;
+      if (progress.status === 'completed' && progress.result_url) {
+        try {
+          const blob = await requestAudioBlob(progress.result_url, {}, 8000);
+          const ok = await playBlob(blob);
+          if (ok) recordToCache(blob);
+          return ok;
+        } catch (_) {
+          return await playURL(progress.result_url, 7000);
+        }
+      }
+    }
+    return false;
+  }
+  function finalBrowserFallback() {
+    if (!live() || playing) return;
+    try {
+      if (typeof SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) return;
+      const utterance = new SpeechSynthesisUtterance(phrase);
+      utterance.lang = locale === 'ko' ? 'ko-KR' : 'en-US';
+      utterance.rate = 0.91;
       window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
-    } catch (error) {
-      console.warn('NamuLab TTS: browser fallback unavailable:', error);
-    }
-  };
+      window.speechSynthesis.speak(utterance);
+    } catch (_) {}
+  }
 
-  const tryNextSource = () => {
-    if (!isCurrent()) return;
-    clearAttempt();
-    if (sourceIndex >= urls.length) {
-      browserFallback();
-      return;
-    }
-
-    const url = urls[sourceIndex++];
-    const audio = new Audio();
-    activeAudio = audio;
-    window.currentAudio = audio;
-    audio.preload = 'auto';
-    audio.referrerPolicy = 'no-referrer';
-    audio.playsInline = true;
-    let started = false;
-    let failed = false;
-
-    const fail = (reason) => {
-      if (!isCurrent() || failed || started) return;
-      failed = true;
-      console.warn('NamuLab TTS: audio provider unavailable:', reason || url);
-      tryNextSource();
-    };
-    audio.onplaying = () => {
-      if (!isCurrent()) {
-        audio.pause();
-        return;
-      }
-      started = true;
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-    };
-    audio.onerror = () => fail('Audio load failed: ' + url.split('?')[0]);
-    audio.onended = () => {
-      if (window.currentAudio === audio) window.currentAudio = null;
-    };
-    // Allow enough time for Korean audio on a slower Telegram WebView.
-    // A two-second timeout was aborting perfectly valid network requests.
-    timeoutId = setTimeout(() => fail('Audio start timeout'), 6500);
-    audio.src = url;
+  (async () => {
     try {
-      const startedPlayback = audio.play();
-      if (startedPlayback && typeof startedPlayback.catch === 'function') {
-        startedPlayback.catch(error => fail(error && error.message));
-      }
-    } catch (error) {
-      fail(error && error.message);
-    }
-  };
+      const cached = await readFromCache();
+      if (!live()) return;
+      if (cached && await playBlob(cached)) return;
+      if (!live()) return;
 
-  tryNextSource();
+      // FreeAPI advertises a direct GET URL; no CORS is needed for an Audio element.
+      // If unavailable, try its documented POST and TTS.ai's anonymous service.
+      const voice = locale === 'ko' ? 'ko-KR' : 'en-US';
+      const direct = 'https://freeapi.pro/api/tts?text=' + encodeURIComponent(phrase) +
+        '&voice=' + encodeURIComponent(voice);
+      if (await playURL(direct, 5200)) return;
+      if (!live()) return;
+      try { if (await tryFreeApiPost()) return; }
+      catch (error) { console.debug('NamuLab TTS FreeAPI:', error.message); }
+      if (!live()) return;
+      try { if (await tryTtsAi()) return; }
+      catch (error) { console.debug('NamuLab TTS TTS.ai:', error.message); }
+      finalBrowserFallback();
+    } catch (error) {
+      if (live()) { console.debug('NamuLab TTS:', error.message); finalBrowserFallback(); }
+    }
+  })();
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
