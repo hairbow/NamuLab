@@ -9,6 +9,39 @@
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   <!-- Официальный Telegram Mini Apps SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!--
+    Supabase Database setup (run once in Supabase SQL Editor; never in the browser):
+
+    create table if not exists public.users (
+      user_id text primary key,
+      nickname text not null default '',
+      country text not null check (country in ('KZ','KR','US')),
+      eco bigint not null default 0,
+      streak integer not null default 0,
+      state_json jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists namulab_users_eco_idx on public.users (eco desc);
+    create index if not exists namulab_users_streak_idx on public.users (streak desc);
+
+    create or replace function public.get_country_totals()
+    returns table(country text,total_eco bigint)
+    language sql stable security invoker
+    as $$
+      select u.country, sum(u.eco)::bigint from public.users u group by u.country
+    $$;
+
+    SECURITY: This client can call the table only with permissions allowed by
+    Supabase Row Level Security and PostgreSQL GRANTs. Do NOT enable unrestricted
+    anonymous UPDATE / INSERT on users: it would let anybody forge identities,
+    change ECO balances and overwrite someone else's progress. For production,
+    verify Telegram initData cryptographically on the server (Edge Function),
+    use Supabase Auth and RLS, and check rewards server-side. A publishable key
+    is public; the Telegram user_id read in browser is NOT verified authentication.
+    The HTML is a functional client, not a secure replacement for that backend.
+  -->
+  <!-- Official Supabase JavaScript v2 SDK; no build step required. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;600;700&display=swap');
     :root { color-scheme: dark; --bg:#061713; --panel:#0b2620; --mint:#bcff7e; --text:#f2fff6; --muted:#8aa99f; }
@@ -77,6 +110,16 @@
     .toast.show { opacity:1; transform:translate(-50%,0); }
     @media (max-width:355px) { .app-content,.sticky-header{padding-left:14px;padding-right:14px} .stat-pill{padding:8px;font-size:11px} .lang-switch button{padding:6px} .card-face{padding:18px} .section-title{font-size:27px} }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
+    /* Supabase status: compact, consistent with the current emerald visual language. */
+    .cloud-line { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; min-width:0; }
+    .cloud-status { display:inline-flex; align-items:center; gap:6px; min-width:0; color:#a5c8b6; font-size:11px; font-weight:700; line-height:1.5; overflow-wrap:anywhere; }
+    .cloud-status .cloud-dot { width:7px; height:7px; flex:none; border-radius:50%; background:#779a8c; }
+    .cloud-status.synced .cloud-dot { background:#b9ff8d; box-shadow:0 0 9px #a4f58070; }
+    .cloud-status.syncing .cloud-dot,.cloud-status.connecting .cloud-dot { background:#ffe1a1; animation:cloudPulse 1.5s ease-in-out infinite; }
+    .cloud-status.offline .cloud-dot,.cloud-status.error .cloud-dot { background:#ffb5a0; }
+    .cloud-refresh { display:inline-flex; align-items:center; justify-content:center; gap:6px; flex:none; padding:7px 11px; border-radius:11px; border:1px solid #b9fba13d; background:#baff8a13; color:#d5ffc0; font-weight:800; font-size:11px; }
+    .cloud-refresh:disabled { cursor:wait; opacity:.65; }
+    @keyframes cloudPulse { 50% { opacity:.35; } }
     /* Step 2 — только новые элементы. Палитра, шрифты и стилистика Step 1 сохранены. */
     .card-shell,.card-rotator { min-height:510px; }
     .card-face { padding:23px; }
@@ -2523,6 +2566,17 @@ const FINAL_RELEASE_UI = {
   ko:{searchDailyCounter:'오늘 남은 검색 보너스: {remaining}/5',searchLimitReached:'오늘의 검색 보너스 5회를 모두 받았어요. 검색은 계속 자유롭게 이용할 수 있어요!',saveShort:'저장',savedShort:'저장됨'}
 };
 for(const lang of ['ru','en','ko'])Object.assign(UI[lang],FINAL_RELEASE_UI[lang]);
+const CLOUD_UI = {
+  ru:{cloudRefresh:'Обновить',cloudSynced:'Синхронизировано с облаком',cloudConnecting:'Подключение к облаку…',cloudSyncing:'Сохраняем в облако…',cloudOffline:'Офлайн · прогресс сохранён на устройстве',cloudError:'Облако недоступно · работаем локально',cloudRefreshDone:'Общий рейтинг обновлён',cloudRefreshFail:'Сейчас не удалось обновить рейтинг',cloudRankingSub:'Реальные игроки и 10 демонстрационных участников',cloudDemo:'10 участников с пометкой DEMO — пример; остальные записи загружаются из Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ОНЛАЙН',cloudNoServer:'Не удаётся подключиться к Supabase. Твои данные остаются на устройстве.',cloudRestored:'Прогресс загружен из облака',cloudLoadingLeaderboard:'Загружаем игроков…'},
+  en:{cloudRefresh:'Refresh',cloudSynced:'Synced with cloud',cloudConnecting:'Connecting to cloud…',cloudSyncing:'Saving to cloud…',cloudOffline:'Offline · progress saved on this device',cloudError:'Cloud unavailable · local mode',cloudRefreshDone:'Global leaderboard updated',cloudRefreshFail:'Could not refresh leaderboard right now',cloudRankingSub:'Real players and 10 demo participants',cloudDemo:'10 DEMO players are examples; other entries come from Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ONLINE',cloudNoServer:'Supabase is unavailable. Your progress is still saved locally.',cloudRestored:'Progress restored from cloud',cloudLoadingLeaderboard:'Loading players…'},
+  ko:{cloudRefresh:'새로고침',cloudSynced:'클라우드 동기화 완료',cloudConnecting:'클라우드 연결 중…',cloudSyncing:'클라우드에 저장 중…',cloudOffline:'오프라인 · 이 기기에 학습 기록을 저장했어요',cloudError:'클라우드 연결 불가 · 기기에서 계속 학습할 수 있어요',cloudRefreshDone:'전체 순위를 새로 불러왔어요',cloudRefreshFail:'지금은 순위를 새로 불러올 수 없어요',cloudRankingSub:'실제 사용자와 체험용 참가자 10명',cloudDemo:'DEMO 표시가 있는 10명은 예시 사용자이며, 나머지는 Supabase에서 불러와요.',cloudDemoBadge:'DEMO',cloudRealBadge:'온라인',cloudNoServer:'Supabase에 연결할 수 없어요. 학습 기록은 기기에 안전하게 남아 있어요.',cloudRestored:'클라우드에 저장된 학습 기록을 불러왔어요',cloudLoadingLeaderboard:'참가자 정보를 불러오는 중…'}
+};
+for(const lang of ['ru','en','ko'])Object.assign(UI[lang],CLOUD_UI[lang]);
+UI.ru.editSub='Ник и страна сохраняются на устройстве и синхронизируются с облаком при подключении.';
+UI.en.editSub='Your nickname and country are saved on this device and synced to the cloud when connected.';
+UI.ko.editSub='닉네임과 국가는 이 기기에 저장되며, 인터넷에 연결되면 클라우드와 동기화돼요.';
+
+
 
 
 const STORAGE_KEY = 'namulab_release_v1';
@@ -2550,6 +2604,41 @@ try { telegram?.ready(); telegram?.expand(); telegram?.setHeaderColor?.('#061a14
 catch(error) { console.info('Telegram SDK is unavailable outside Telegram',error); }
 const telegramUser = telegram?.initDataUnsafe?.user || null;
 const telegramName = telegramUser ? String(telegramUser.username || [telegramUser.first_name,telegramUser.last_name].filter(Boolean).join(' ')).trim().slice(0,22) : '';
+
+// Supabase keys of type "publishable" are intended for public client applications.
+// IMPORTANT: the client-provided Telegram ID is NOT proof of identity and is NOT
+// sufficient for secure RLS. Production rewards require a verified auth layer.
+const SUPABASE_URL='https://zsehmqrpcnazkvdnqaht.supabase.co';
+const SUPABASE_ANON_KEY='sb_publishable_5S7fL-nE92tsi2oKKrMmXg_KLMBuIvB';
+const USER_ID_KEY='namulab_web_identity_v1';
+function getStableUserId() {
+  const tgId=telegramUser?.id;
+  if(tgId!==undefined && tgId!==null && /^\d{1,20}$/.test(String(tgId))) return 'tg_'+String(tgId);
+  try {
+    const saved=localStorage.getItem(USER_ID_KEY);
+    if(saved && /^web_[A-Za-z0-9-]{12,90}$/.test(saved)) return saved;
+  } catch(error) {console.info('Browser ID storage unavailable',error);}
+  let randomId='';
+  try {
+    randomId=typeof crypto?.randomUUID==='function' ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(18)),value=>value.toString(16).padStart(2,'0')).join('');
+  } catch(error) {randomId=Date.now().toString(36)+'_'+Math.random().toString(36).slice(2);}
+  const id='web_'+randomId;
+  try {localStorage.setItem(USER_ID_KEY,id);} catch(error) {console.info('Browser ID is temporary',error);}
+  return id;
+}
+const USER_ID=getStableUserId();
+const CLOUD_LOCAL_KEY='namulab_cloud_state_v1_'+USER_ID;
+const LEGACY_MIGRATION_OWNER_KEY='namulab_legacy_migration_owner_v1';
+let SUPABASE_CLIENT=null;
+try {
+  if(window.supabase?.createClient) {
+    SUPABASE_CLIENT=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{
+      auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false},
+      global:{headers:{'X-Client-Info':'namulab-miniapp-v1'}}
+    });
+  }
+} catch(error) {console.warn('Supabase SDK not available:',error);}
+
 
 const defaultState = {
   country:null,nickname:'',eco:0,streak:1,lastStudyDate:null,
@@ -2636,12 +2725,30 @@ function migrateV1(old) {
   const learnedIds=Array.isArray(old?.studied)?[...new Set(old.studied.map(i=>toId[i]).filter(Boolean))]:[];
   return normalizeState({...old,learnedIds,rewardedTermIds:learnedIds});
 }
-function loadState() {
+function readCloudLocalEnvelope() {
   try {
-    const latest=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');if(latest) return normalizeState(latest);
-    const v3=JSON.parse(localStorage.getItem(PREV_V3_STORAGE_KEY)||'null');if(v3) return normalizeState(v3);
-    const v2=JSON.parse(localStorage.getItem(PREV_STORAGE_KEY)||'null');if(v2) return normalizeState(v2);
-    const v1=JSON.parse(localStorage.getItem(FIRST_STORAGE_KEY)||'null');if(v1) return migrateV1(v1);
+    const raw=JSON.parse(localStorage.getItem(CLOUD_LOCAL_KEY)||'null');
+    return raw && raw.state && typeof raw.state==='object' ? raw : null;
+  } catch(error) {console.info('Cloud local cache unavailable',error);return null;}
+}
+const LOCAL_ENVELOPE=readCloudLocalEnvelope();
+function loadState() {
+  if(LOCAL_ENVELOPE) return normalizeState(LOCAL_ENVELOPE.state);
+  // Import the former single-device progress only once, for one local identity.
+  try {
+    const owner=localStorage.getItem(LEGACY_MIGRATION_OWNER_KEY);
+    if(owner && owner!==USER_ID) return normalizeState(defaultState);
+    const previous=[
+      [STORAGE_KEY,false],[PREV_V3_STORAGE_KEY,false],
+      [PREV_STORAGE_KEY,false],[FIRST_STORAGE_KEY,true]
+    ];
+    for(const [key,isStep1] of previous){
+      const raw=JSON.parse(localStorage.getItem(key)||'null');
+      if(raw){
+        localStorage.setItem(LEGACY_MIGRATION_OWNER_KEY,USER_ID);
+        return isStep1 ? migrateV1(raw) : normalizeState(raw);
+      }
+    }
   } catch(error) {console.warn('Saved data unavailable:',error);}
   return normalizeState(defaultState);
 }
@@ -2650,18 +2757,53 @@ function loadState() {
 const APP_STATE = Object.assign(loadState(),{
   flipped:false,modalMode:null,draftCountry:null,draftNickname:'',searchQuery:'',
   searchResult:null,searchLoading:false,searchErrorKey:null,searchSuggestions:[],requestSerial:0,
-  requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:''
+  requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',
+  cloudStatus: SUPABASE_CLIENT ? 'connecting' : 'offline',cloudPlayers:[],
+  cloudTotals:{KZ:0,KR:0,US:0},cloudTotalsAvailable:false,
+  cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null
 });
 APP_STATE.modalMode=APP_STATE.country && APP_STATE.nickname ? null : 'onboarding';
 APP_STATE.draftCountry=APP_STATE.country;
 APP_STATE.draftNickname=APP_STATE.nickname || telegramName;
 let toastTimer=null;
-function persist() {
-  try {
-    const data={};for(const key of PERSIST_KEYS) data[key]=APP_STATE[key];
-    localStorage.setItem(STORAGE_KEY,JSON.stringify(data));
-  } catch(error) {console.warn('Could not persist progress',error);}
+let localEditedAt=Number.isFinite(LOCAL_ENVELOPE?.editedAt)?LOCAL_ENVELOPE.editedAt:0;
+let localDirty=Boolean(LOCAL_ENVELOPE?.dirty) || !LOCAL_ENVELOPE;
+let lastSavedSnapshot=JSON.stringify(getPersistentState());
+let applyingCloudState=false;
+let cloudBootstrapped=false;
+let cloudProfileChecked=false;
+let cloudRefreshAgain=false;
+let cloudDebounceTimer=null;
+let cloudSaveInFlight=false;
+let pendingCloudWrite=false;
+let cloudReadRevision=0;
+let cloudRequestNumber=0;
+let cloudRankingRequest=0;
+
+function getPersistentState(){
+  const result={};
+  for(const key of PERSIST_KEYS)result[key]=APP_STATE[key];
+  return result;
 }
+function storeLocalEnvelope(state){
+  try {
+    localStorage.setItem(CLOUD_LOCAL_KEY,JSON.stringify({state,editedAt:localEditedAt,dirty:localDirty}));
+  } catch(error) {console.info('Local progress storage unavailable',error);}
+}
+function persist() {
+  const state=getPersistentState();
+  const snapshot=JSON.stringify(state);
+  if(snapshot===lastSavedSnapshot)return;
+  lastSavedSnapshot=snapshot;
+  if(!applyingCloudState){
+    localEditedAt=Date.now();
+    localDirty=true;
+  }
+  storeLocalEnvelope(state);
+  if(!applyingCloudState && cloudBootstrapped) scheduleCloudSave();
+}
+function commitLocalCache(){storeLocalEnvelope(getPersistentState());}
+
 function t(key) {
   const item=UI[APP_STATE.language]?.[key];
   return typeof item==='string'?item.replaceAll('{count}',String(TERMS_DB.length)):item??key;
@@ -2903,29 +3045,44 @@ function renderCards() {
     <p class="muted text-[11px] mt-5 leading-5 text-center">${t('wikiSearchTip')}</p>`;
 }
 function renderRanking() {
-  const totals = {KZ:0, KR:0, US:0};
-  for (const player of DEMO_PLAYERS) totals[player.country] += player.eco;
-  if (APP_STATE.country) totals[APP_STATE.country] += APP_STATE.eco;
-  const highest = Math.max(1, ...Object.values(totals));
-  const colors = {
+  const totals={KZ:0,KR:0,US:0};
+  for(const player of DEMO_PLAYERS)totals[player.country]+=player.eco;
+  if(APP_STATE.cloudTotalsAvailable){
+    for(const code of COUNTRIES)totals[code]+=APP_STATE.cloudTotals[code]||0;
+    // Replace the last remote snapshot of this user with the live local state.
+    const previous=APP_STATE.cloudSelfAtTotals;
+    if(previous?.country && COUNTRIES.includes(previous.country)){
+      totals[previous.country]=Math.max(0,totals[previous.country]-previous.eco);
+    }
+  }
+  if(APP_STATE.country)totals[APP_STATE.country]+=APP_STATE.eco;
+  const highest=Math.max(1,...Object.values(totals));
+  const colors={
     KZ:'linear-gradient(90deg,#94e9af,#c9ff80)',
     KR:'linear-gradient(90deg,#5da0ed,#91d3ff)',
     US:'linear-gradient(90deg,#f2bb8c,#ff8f8b)'
   };
-  const all = DEMO_PLAYERS.map(player => ({...player,you:false}));
-  all.push({name:APP_STATE.nickname || t('noName'),country:APP_STATE.country || 'KZ',eco:APP_STATE.eco,streak:effectiveStreak(),you:true});
-  all.sort((a,b) => APP_STATE.sortBy==='eco'
-    ? b.eco-a.eco || b.streak-a.streak
-    : b.streak-a.streak || b.eco-a.eco);
+  const real=APP_STATE.cloudPlayers.filter(p=>p.id!==USER_ID).map(p=>({...p,real:true,you:false}));
+  const demos=DEMO_PLAYERS.map((player,index)=>({...player,id:'demo_'+index,demo:true,you:false}));
+  const me={id:USER_ID,name:APP_STATE.nickname||t('noName'),country:APP_STATE.country||'KZ',eco:APP_STATE.eco,streak:effectiveStreak(),you:true,real:true};
+  const all=[...real,...demos,me];
+  all.sort((a,b)=>APP_STATE.sortBy==='eco'
+    ?b.eco-a.eco||b.streak-a.streak||a.name.localeCompare(b.name)
+    :b.streak-a.streak||b.eco-a.eco||a.name.localeCompare(b.name));
+  const cloudStatusText=t(APP_STATE.cloudStatus==='synced'?'cloudSynced':APP_STATE.cloudStatus==='syncing'?'cloudSyncing':APP_STATE.cloudStatus==='connecting'?'cloudConnecting':APP_STATE.cloudStatus==='offline'?'cloudOffline':'cloudError');
   return `<div class="eyebrow">${t('global')} 🌍</div>
     <h1 class="section-title mt-3">${t('rankingTitle')}</h1>
-    <p class="muted text-sm mt-2">${t('rankingSub')}</p>
-    <section class="glass rounded-[25px] p-5 mt-7">
+    <p class="muted text-sm mt-2">${t('cloudRankingSub')}</p>
+    <div class="cloud-line mt-4">
+      <span class="cloud-status ${APP_STATE.cloudStatus}" aria-live="polite"><span class="cloud-dot"></span>${cloudStatusText}</span>
+      <button type="button" class="cloud-refresh" data-action="refreshCloud" ${APP_STATE.cloudRefreshing?'disabled':''}>${APP_STATE.cloudRefreshing?'<span class="loading-spinner"></span>':'🔄'} ${t('cloudRefresh')}</button>
+    </div>
+    <section class="glass rounded-[25px] p-5 mt-5">
       <div class="flex gap-3 items-center mb-5"><div class="w-11 h-11 rounded-[13px] bg-lime-200/10 text-lime-200 grid place-items-center">${icon('globe')}</div>
-        <div><h2 class="font-extrabold text-lg">${t('countryBattle')}</h2><p class="muted text-xs">${t('countryBattleSub')}</p></div>
+        <div class="min-w-0"><h2 class="font-extrabold text-lg">${t('countryBattle')}</h2><p class="muted text-xs">${t('cloudRankingSub')}</p></div>
       </div>
-      ${COUNTRIES.map(country => `<div class="battle-row">
-        <div class="text-sm font-bold">${COUNTRY_FLAGS[country]} ${t('countryNames')[country]} ${country===APP_STATE.country?'<span class="text-lime-200 text-[10px]">✦</span>':''}</div>
+      ${COUNTRIES.map(country=>`<div class="battle-row">
+        <div class="text-sm font-bold break-words min-w-0">${COUNTRY_FLAGS[country]} ${t('countryNames')[country]} ${country===APP_STATE.country?'<span class="text-lime-200 text-[10px]">✦</span>':''}</div>
         <div class="text-sm font-extrabold tabular-nums">${localeNumber(totals[country])} <span class="muted text-xs">ECO</span></div>
         <div class="progress-track"><div class="progress-fill" style="width:${totals[country]/highest*100}%;background:${colors[country]}"></div></div>
       </div>`).join('')}
@@ -2937,18 +3094,18 @@ function renderRanking() {
         <button type="button" data-sort="streak" class="${APP_STATE.sortBy==='streak'?'active':''}" aria-pressed="${APP_STATE.sortBy==='streak'}">${t('sortStreak')}</button>
       </div>
       <div class="glass rounded-[23px] p-2">
-        ${all.map((player,index) => `<div class="player-row ${player.you?'you':''}">
+        ${all.map((player,index)=>`<div class="player-row ${player.you?'you':''}">
           <div class="w-5 text-center text-xs font-bold ${index<3?'text-lime-200':'muted'}">${index===0?'🥇':index===1?'🥈':index===2?'🥉':index+1}</div>
-          <div class="avatar">${esc(player.name.slice(0,1).toUpperCase())}</div>
-          <div class="min-w-0 flex-1"><div class="truncate text-sm font-bold">${esc(player.name)} ${player.you?`<span class="text-lime-200 text-[10px]">(${t('you')})</span>`:''}</div>
-            <div class="muted text-[11px] mt-1">${COUNTRY_FLAGS[player.country]} ${t('countryNames')[player.country]}</div>
+          <div class="avatar">${esc((player.name||'?').slice(0,1).toUpperCase())}</div>
+          <div class="min-w-0 flex-1"><div class="truncate text-sm font-bold" title="${esc(player.name)}">${esc(player.name)} ${player.you?`<span class="text-lime-200 text-[10px]">(${t('you')})</span>`:''}</div>
+            <div class="muted text-[11px] mt-1 truncate">${COUNTRY_FLAGS[player.country]||'🌍'} ${t('countryNames')[player.country]||''} ${player.demo?`<span class="text-lime-200/70 text-[9px]">· ${t('cloudDemoBadge')}</span>`:''}</div>
           </div>
-          <div class="text-right"><div class="font-extrabold text-[13px]">${localeNumber(APP_STATE.sortBy==='eco'?player.eco:player.streak)} <span class="text-lime-200 text-[10px]">${APP_STATE.sortBy==='eco'?'ECO':'🔥'}</span></div>
+          <div class="text-right flex-none"><div class="font-extrabold text-[13px]">${localeNumber(APP_STATE.sortBy==='eco'?player.eco:player.streak)} <span class="text-lime-200 text-[10px]">${APP_STATE.sortBy==='eco'?'ECO':'🔥'}</span></div>
             <div class="muted text-[11px] mt-1">${APP_STATE.sortBy==='eco'?'🔥 '+localeNumber(player.streak)+' '+t('days'):'🌱 '+localeNumber(player.eco)+' ECO'}</div>
           </div>
         </div>`).join('')}
       </div>
-      <p class="muted text-[11px] leading-5 mt-4 text-center">* ${t('demo')}</p>
+      <p class="muted text-[11px] leading-5 mt-4 text-center">* ${t('cloudDemo')}</p>
     </section>`;
 }
 function getCasesByFilter() {
@@ -3040,6 +3197,7 @@ function studyRelatedTerm(termId) {
   APP_STATE.focusTermId=termId;APP_STATE.selectedLevel=term.level;
   APP_STATE.examMode='cards';APP_STATE.activeTab='cards';APP_STATE.flipped=false;
   renderAll();haptic();window.scrollTo({top:0,behavior:'smooth'});
+  if(tab==='ranking')void refreshCloudRanking({silent:true});
 }
 function renderProfile() {
   return `<div class="eyebrow">NAMULAB 🌱</div>
@@ -3663,10 +3821,234 @@ async function sendShareCard() {
   }
   await copyShareText(report);
 }
+// ================================================================
+// Cloud sync. All visual output still comes from APP_STATE/renderAll().
+// A missing table, denied RLS policy, lost connection or CDN failure
+// never prevents the local teaching/quiz/case features from working.
+// ================================================================
+const CLOUD_READ_TIMEOUT_MS=9000;
+const CLOUD_PAGE_SIZE=1000;
+function readTimestamp(timestamp){
+  const parsed=Date.parse(String(timestamp||''));
+  return Number.isFinite(parsed)?parsed:0;
+}
+function sanitizeCloudPlayer(row){
+  if(!row || !validCountry(row.country))return null;
+  const id=String(row.user_id||'').slice(0,100);
+  if(!id)return null;
+  return {id,name:String(row.nickname||'').trim().slice(0,22)||'Explorer',country:validCountry(row.country),eco:safeNumber(row.eco),streak:safeNumber(row.streak)};
+}
+function cloudDeadline(){
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),CLOUD_READ_TIMEOUT_MS);
+  return {signal:ctrl.signal,clear:()=>clearTimeout(timer)};
+}
+function setCloudStatus(status){
+  if(APP_STATE.cloudStatus!==status){APP_STATE.cloudStatus=status;renderAll();}
+}
+function mergeArrayUnion(local,remote,max=20000){return uniqueStrings([...(Array.isArray(local)?local:[]),...(Array.isArray(remote)?remote:[])],max);}
+function mergeStatesForPendingLocal(local,remote){
+  const target=normalizeState(remote);
+  // Keep achievements earned in either location; do not discard offline study.
+  target.learnedIds=mergeArrayUnion(local.learnedIds,remote.learnedIds).filter(id=>TERMS_DB.some(t=>t.id===id));
+  target.rewardedTermIds=mergeArrayUnion(local.rewardedTermIds,remote.rewardedTermIds);
+  target.searchedIds=mergeArrayUnion(local.searchedIds,remote.searchedIds);
+  target.examRewardKeys=mergeArrayUnion(local.examRewardKeys,remote.examRewardKeys);
+  target.solvedCaseIds=mergeArrayUnion(local.solvedCaseIds,remote.solvedCaseIds).filter(id=>LAB_CASES_DB.some(c=>c.id===id));
+  target.weakTermIds=mergeArrayUnion(local.weakTermIds,remote.weakTermIds);
+  const seen=new Set();
+  target.favorites=[...(local.favorites||[]),...(remote.favorites||[])].filter(item=>item?.id&&!seen.has(item.id)&&seen.add(item.id)).slice(0,150);
+  target.eco=Math.max(local.eco,remote.eco);
+  target.streak=Math.max(local.streak,remote.streak);
+  const days=[local.lastStudyDate,remote.lastStudyDate].filter(Boolean).sort();
+  target.lastStudyDate=days.at(-1)||null;
+  const ls=local.examStats,rs=remote.examStats;
+  target.examStats={attempts:Math.max(ls.attempts,rs.attempts),total:Math.max(ls.total,rs.total),correct:Math.max(ls.correct,rs.correct),passed:Math.max(ls.passed,rs.passed)};
+  target.caseAttempts={...remote.caseAttempts,...local.caseAttempts};
+  target.nickname=local.nickname||remote.nickname;
+  target.country=local.country||remote.country;
+  target.language=local.language;
+  target.selectedLevel=local.selectedLevel;
+  target.examMode=local.examMode;
+  target.activeTab=local.activeTab;
+  target.sortBy=local.sortBy;
+  target.caseFilter=local.caseFilter;
+  target.caseActiveId=local.caseActiveId;
+  target.examSession=local.examSession||remote.examSession;
+  const dates=[local.dailySearchRewards,remote.dailySearchRewards].filter(Boolean);
+  const newest=dates.reduce((a,b)=>!a || String(b.date||'')>String(a.date||'')?b:a,null);
+  target.dailySearchRewards={date:newest?.date||null,count:Math.max(0,...dates.filter(d=>d.date===newest?.date).map(d=>d.count||0))};
+  return normalizeState(target);
+}
+function installPersistedState(next,remoteTime,keepDirty=false){
+  applyingCloudState=true;
+  const cleaned=normalizeState(next);
+  for(const key of PERSIST_KEYS)APP_STATE[key]=cleaned[key];
+  localEditedAt=keepDirty?Math.max(localEditedAt,Date.now()):remoteTime;
+  localDirty=keepDirty;
+  lastSavedSnapshot=JSON.stringify(getPersistentState());
+  storeLocalEnvelope(getPersistentState());
+  applyingCloudState=false;
+  APP_STATE.modalMode=APP_STATE.country&&APP_STATE.nickname?null:'onboarding';
+  APP_STATE.draftCountry=APP_STATE.country;
+  APP_STATE.draftNickname=APP_STATE.nickname||telegramName;
+  renderAll();
+}
+function scheduleCloudSave(){
+  if(!cloudBootstrapped || !cloudProfileChecked || !SUPABASE_CLIENT)return;
+  clearTimeout(cloudDebounceTimer);
+  cloudDebounceTimer=setTimeout(()=>{void flushCloudSave();},500);
+}
+async function flushCloudSave(){
+  if(!SUPABASE_CLIENT || !cloudBootstrapped || !cloudProfileChecked || !localDirty || !APP_STATE.country || !APP_STATE.nickname)return;
+  if(cloudSaveInFlight){pendingCloudWrite=true;return;}
+  if(typeof navigator!=='undefined' && navigator.onLine===false){setCloudStatus('offline');return;}
+  cloudSaveInFlight=true;
+  setCloudStatus('syncing');
+  const data=getPersistentState();
+  const snapshot=JSON.stringify(data);
+  const row={
+    user_id:USER_ID,nickname:APP_STATE.nickname,country:APP_STATE.country,
+    eco:safeNumber(APP_STATE.eco),streak:safeNumber(effectiveStreak()),
+    state_json:data,updated_at:new Date().toISOString()
+  };
+  const guard=cloudDeadline();
+  try {
+    const {error}=await SUPABASE_CLIENT.from('users')
+      .upsert(row,{onConflict:'user_id'}).abortSignal(guard.signal);
+    if(error)throw error;
+    if(snapshot===JSON.stringify(getPersistentState())){
+      localDirty=false;
+      commitLocalCache();
+    }else{
+      pendingCloudWrite=true;
+    }
+    APP_STATE.cloudLastSyncedAt=Date.now();
+    setCloudStatus('synced');
+    if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
+  } catch(error){
+    console.warn('Supabase save failed; local progress preserved',error);
+    setCloudStatus(navigator.onLine===false?'offline':'error');
+  } finally {
+    guard.clear();cloudSaveInFlight=false;
+    if(pendingCloudWrite){pendingCloudWrite=false;scheduleCloudSave();}
+  }
+}
+async function initializeCloud(){
+  if(!SUPABASE_CLIENT){cloudBootstrapped=true;setCloudStatus('offline');return;}
+  const readAtStart=lastSavedSnapshot;
+  cloudReadRevision++;
+  const token=cloudReadRevision;
+  const guard=cloudDeadline();
+  try{
+    const {data:remote,error}=await SUPABASE_CLIENT.from('users')
+      .select('user_id,nickname,country,eco,streak,state_json,updated_at')
+      .eq('user_id',USER_ID).maybeSingle().abortSignal(guard.signal);
+    if(error)throw error;
+    if(token!==cloudReadRevision)return;
+    if(remote){
+      const remoteState=normalizeState({...remote.state_json,
+        nickname:remote.nickname,country:remote.country,eco:remote.eco,streak:remote.streak});
+      const remoteTime=readTimestamp(remote.updated_at);
+      const editedWhileLoading=readAtStart!==JSON.stringify(getPersistentState());
+      const shouldUseRemote=remoteState.eco>APP_STATE.eco || remoteTime>localEditedAt;
+      if(editedWhileLoading){
+        installPersistedState(mergeStatesForPendingLocal(getPersistentState(),remoteState),Date.now(),true);
+      } else if(shouldUseRemote && !localDirty){
+        installPersistedState(remoteState,remoteTime,false);
+        toast(t('cloudRestored'));
+      } else if(shouldUseRemote && localDirty && localEditedAt>remoteTime){
+        // Local offline changes were made later; merge rather than erase them.
+        installPersistedState(mergeStatesForPendingLocal(getPersistentState(),remoteState),Date.now(),true);
+      } else if(shouldUseRemote){
+        installPersistedState(remoteState,remoteTime,false);
+        toast(t('cloudRestored'));
+      }
+      if(!localDirty && !shouldUseRemote)commitLocalCache();
+    }
+    cloudProfileChecked=true;
+    setCloudStatus('synced');
+    cloudBootstrapped=true;
+    if(!remote || localDirty)scheduleCloudSave();
+  }catch(error){
+    console.warn('Supabase profile read failed',error);
+    cloudBootstrapped=true;
+    setCloudStatus(navigator.onLine===false?'offline':'error');
+    // Wait for reconnection before attempting the initial upsert: do not
+    // overwrite a remote profile that could not be read.
+  }finally{
+    guard.clear();
+    if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
+  }
+}
+async function fetchCountryTotals(signal){
+  // Fast, scalable path if the optional SQL aggregation function exists.
+  try {
+    const {data,error}=await SUPABASE_CLIENT.rpc('get_country_totals').abortSignal(signal);
+    if(!error && Array.isArray(data)){
+      const sums={KZ:0,KR:0,US:0};
+      for(const item of data){const country=validCountry(item.country);if(country)sums[country]+=safeNumber(Number(item.total_eco ?? item.eco_total ?? item.eco));}
+      return sums;
+    }
+  }catch(error){if(signal.aborted)throw error;}
+  // Portable fallback: page through ALL profiles; do not confuse top-50
+  // with country totals. For large communities, deploy the RPC above.
+  const totals={KZ:0,KR:0,US:0};
+  for(let start=0;start<100000;start+=CLOUD_PAGE_SIZE){
+    const {data,error}=await SUPABASE_CLIENT.from('users')
+      .select('country,eco').range(start,start+CLOUD_PAGE_SIZE-1).abortSignal(signal);
+    if(error)throw error;
+    for(const item of data||[]){const country=validCountry(item.country);if(country)totals[country]+=safeNumber(item.eco);}
+    if(!data || data.length<CLOUD_PAGE_SIZE)return totals;
+  }
+  throw new Error('Country totals require the get_country_totals RPC for a community of 100,000+ users');
+}
+async function refreshCloudRanking({silent=false}={}){
+  if(!SUPABASE_CLIENT){setCloudStatus('offline');if(!silent)toast(t('cloudNoServer'));return;}
+  if(APP_STATE.cloudRefreshing){cloudRefreshAgain=true;return;}
+  const id=++cloudRankingRequest;
+  APP_STATE.cloudRefreshing=true;
+  renderAll();
+  const guard=cloudDeadline();
+  try {
+    const order=APP_STATE.sortBy==='streak'?'streak':'eco';
+    const [topResult,totals,selfResult]=await Promise.all([
+      SUPABASE_CLIENT.from('users').select('user_id,nickname,country,eco,streak')
+        .order(order,{ascending:false}).limit(50).abortSignal(guard.signal),
+      fetchCountryTotals(guard.signal),
+      SUPABASE_CLIENT.from('users').select('user_id,country,eco')
+        .eq('user_id',USER_ID).maybeSingle().abortSignal(guard.signal)
+    ]);
+    if(topResult.error)throw topResult.error;
+    if(selfResult.error)throw selfResult.error;
+    if(id!==cloudRankingRequest)return;
+    const result=[];const seen=new Set();
+    for(const row of topResult.data||[]){const user=sanitizeCloudPlayer(row);if(user&&!seen.has(user.id)){seen.add(user.id);result.push(user);}}
+    APP_STATE.cloudPlayers=result;
+    APP_STATE.cloudTotals=totals;
+    APP_STATE.cloudTotalsAvailable=true;
+    APP_STATE.cloudSelfAtTotals=selfResult.data&&validCountry(selfResult.data.country)
+      ?{country:validCountry(selfResult.data.country),eco:safeNumber(selfResult.data.eco)}:null;
+    if(APP_STATE.cloudStatus!=='syncing' && cloudProfileChecked)APP_STATE.cloudStatus='synced';
+    renderAll();
+    if(!silent)toast(t('cloudRefreshDone'));
+  }catch(error){
+    console.warn('Could not refresh Supabase leaderboard',error);
+    if(id===cloudRankingRequest){
+      if(APP_STATE.cloudStatus!=='syncing')setCloudStatus(navigator.onLine===false?'offline':'error');
+      if(!silent)toast(t('cloudRefreshFail'));
+    }
+  }finally{
+    guard.clear();APP_STATE.cloudRefreshing=false;renderAll();
+    if(cloudRefreshAgain){cloudRefreshAgain=false;void refreshCloudRanking({silent:true});}
+  }
+}
+
 function handleAction(action,element) {
   switch(action){
     case 'flip': APP_STATE.flipped=!APP_STATE.flipped;renderAll();haptic();break;
     case 'learn':completeLesson();break;
+    case 'refreshCloud':if(!cloudProfileChecked){void initializeCloud();}void refreshCloudRanking();break;
     case 'speak':{
       const lang=element.dataset.speakLang;
       const text=element.dataset.speakSource==='search' ? APP_STATE.searchResult?.versions?.[lang]?.title : getCurrentTerm()?.[lang];
@@ -3712,7 +4094,7 @@ document.addEventListener('click',event=>{
   }
   if(button.dataset.tab){switchTab(button.dataset.tab);return;}
   if(button.dataset.level){chooseLevel(button.dataset.level);return;}
-  if(button.dataset.sort){APP_STATE.sortBy=button.dataset.sort;renderAll();return;}
+  if(button.dataset.sort){APP_STATE.sortBy=button.dataset.sort;renderAll();void refreshCloudRanking({silent:true});return;}
   if(button.dataset.caseFilter){setCaseFilter(button.dataset.caseFilter);return;}
   if(button.dataset.caseId){selectCase(button.dataset.caseId);return;}
   if(button.dataset.caseAnswer!==undefined){answerCase(Number(button.dataset.caseAnswer));return;}
@@ -3732,9 +4114,18 @@ document.addEventListener('keydown',event=>{
     APP_STATE.modalMode=null;renderAll();
   }
 });
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)renderAll();});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){renderAll();if(!cloudProfileChecked)void initializeCloud();else if(localDirty)scheduleCloudSave();}
+});
+window.addEventListener('online',()=>{
+  if(!cloudProfileChecked){void initializeCloud();return;}
+  if(localDirty)scheduleCloudSave();
+  if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
+});
+window.addEventListener('offline',()=>setCloudStatus('offline'));
 window.addEventListener('pageshow',()=>renderAll());
 renderAll();
+void initializeCloud();
 
   </script>
 </body>
