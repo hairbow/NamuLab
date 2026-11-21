@@ -262,7 +262,7 @@
     .wiki-save-btn { display:inline-flex;align-items:center;justify-content:center;flex:none;max-width:160px;min-height:34px;padding:7px 10px;border-radius:11px;border:1px solid #b9fda44d;background:#c4ff8514;color:#d9ffb7;font-size:11px;font-weight:800;line-height:1.2;overflow-wrap:anywhere; }
     .wiki-save-btn:active { transform:scale(.98); }
     .wiki-result-actions { flex-shrink:0; }
-    .share-preview { display:block; width:auto; max-width:100%; max-height:min(58dvh,640px); aspect-ratio:3/4; margin:0 auto; border:1px solid #b6ff9e50; border-radius:17px; object-fit:contain; background:#061a14; }
+    .share-preview { display:block; width:auto; max-width:100%; max-height:min(58dvh,640px); aspect-ratio:3/4; margin:0 auto; border:1px solid #b6ff9e50; border-radius:17px; object-fit:contain; background:#061a14; -webkit-touch-callout:default; -webkit-user-select:auto; user-select:auto; }
     .share-modal { width:min(100%,445px); padding:19px; }
     .share-buttons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
     .share-buttons button { min-width:0; padding:13px 7px; font-size:12px; overflow-wrap:anywhere; }
@@ -2493,7 +2493,8 @@ const RELEASE_UI = {
     "shareModalTitle": "Карточка достижений",
     "shareSubtitle": "Твой прогресс NamuLab в одном изображении",
     "shareDownload": "⬇️ Скачать PNG",
-    "shareSend": "📤 Отправить",
+    "shareSend": "📤 Поделиться",
+    "shareHoldImage": "Зажмите картинку выше, чтобы сохранить её на устройство.",
     "shareClose": "Закрыть",
     "shareCopied": "Скопировано!",
     "shareUnable": "Не удалось поделиться автоматически. Попробуй скачать PNG.",
@@ -2547,6 +2548,7 @@ const RELEASE_UI = {
     "shareSubtitle": "Your NamuLab journey in one image",
     "shareDownload": "⬇️ Download PNG",
     "shareSend": "📤 Share",
+    "shareHoldImage": "Touch and hold the picture above to save it to your device.",
     "shareClose": "Close",
     "shareCopied": "Copied!",
     "shareUnable": "Sharing is unavailable here. Try downloading the PNG.",
@@ -2600,6 +2602,7 @@ const RELEASE_UI = {
     "shareSubtitle": "지금까지의 NamuLab 기록을 한 장에 담았어요.",
     "shareDownload": "⬇️ PNG 저장",
     "shareSend": "📤 공유하기",
+    "shareHoldImage": "위 이미지를 길게 눌러 기기에 저장해 주세요.",
     "shareClose": "닫기",
     "shareCopied": "복사했어요!",
     "shareUnable": "이 환경에서는 바로 공유할 수 없어요. PNG를 저장해 보세요.",
@@ -2898,7 +2901,7 @@ const APP_STATE = Object.assign(loadState(),{
   flipped:false,modalMode:null,draftCountry:null,draftNickname:'',
   nicknameChecking:false,nicknameErrorKey:null,nicknameErrorDetail:null,nicknameCheckSerial:0,searchQuery:'',
   searchResult:null,searchLoading:false,searchErrorKey:null,searchSuggestions:[],requestSerial:0,
-  requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',
+  requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',shareSaveHint:false,
   cloudStatus: sbClient ? 'connecting' : 'offline',cloudPlayers:[],
   cloudTotals:{KZ:0,KR:0,US:0},cloudTotalsAvailable:false,
   cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null,
@@ -3517,6 +3520,7 @@ function renderModal() {
       <div class="flex items-start justify-between gap-3 mb-3"><div class="min-w-0"><h2 id="modalTitle" class="text-xl font-extrabold break-words">${t('shareModalTitle')}</h2><p class="text-xs muted mt-1">${t('shareSubtitle')}</p></div><button type="button" class="subtle-icon-btn" data-action="cancelModal" aria-label="${t('shareClose')}">${icon('close',18)}</button></div>
       ${APP_STATE.shareImage?`<img class="share-preview" src="${APP_STATE.shareImage}" alt="${esc(t('sharePreview'))}"/>`:`<div class="text-center muted p-6">${t('searching')}</div>`}
       <div class="share-buttons mt-3"><button class="secondary-btn" type="button" data-action="downloadShare">${t('shareDownload')}</button><button class="primary-btn" type="button" data-action="sendShare">${t('shareSend')}</button></div>
+      ${APP_STATE.shareSaveHint?`<p class="muted text-xs leading-5 mt-3 text-center break-words" role="status">${t('shareHoldImage')}</p>`:''}
       ${APP_STATE.shareFallbackText?`<textarea class="input-text mt-3 text-xs" readonly rows="5" aria-label="${t('shareTextTitle')}">${esc(APP_STATE.shareFallbackText)}</textarea>`:''}
     </div></div>`);
     return;
@@ -3890,82 +3894,12 @@ function completeLesson() {
   APP_STATE.flipped=false;renderAll();
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
-let currentAudio=null;
-let speakingSerial=0;
-let nativeUtterance=null;
-function speakFallback(value,lang,serial){
-  if(serial!==speakingSerial)return;
-  const engine=window.speechSynthesis;
-  if(!engine||typeof window.SpeechSynthesisUtterance!=='function'){
-    toast(t('audioUnavailable'));return;
-  }
-  const locale=lang==='ko'?'ko-KR':'en-US';
-  const say=()=>{
-    if(serial!==speakingSerial)return;
-    try {
-      const voices=engine.getVoices();
-      const voice=voices.find(v=>v.lang?.toLowerCase()===locale.toLowerCase()) ||
-        voices.find(v=>v.lang?.toLowerCase().startsWith(lang+'-'));
-      // Never pronounce Korean with an unrelated default English voice.
-      if(!voice && voices.length){console.info('[NamuLab TTS] No matching local voice:',locale);toast(t('audioUnavailable'));return;}
-      const utterance=new SpeechSynthesisUtterance(value);
-      utterance.lang=locale;utterance.rate=lang==='ko'?.86:.9;utterance.voice=voice||null;
-      utterance.onerror=error=>{if(serial===speakingSerial){console.warn('[NamuLab TTS] Native synthesis failed:',error?.error||error);toast(t('audioUnavailable'));}};
-      nativeUtterance=utterance;engine.cancel();engine.speak(utterance);
-    }catch(error){console.warn('[NamuLab TTS] Native error:',error);toast(t('audioUnavailable'));}
-  };
-  if(!engine.getVoices().length){
-    let loaded=false;
-    const listener=()=>{if(loaded)return;loaded=true;engine.removeEventListener?.('voiceschanged',listener);say();};
-    engine.addEventListener?.('voiceschanged',listener,{once:true});
-    setTimeout(listener,450);
-  }else say();
-}
-function speak(value,lang){
-  if(!['en','ko'].includes(lang))return;
-  const text=String(value||'').trim();
-  if(!text)return;
-  const serial=++speakingSerial;
-  // One active playback at a time. Start Audio synchronously from the user's click
-  // to preserve WebView's user-activation permission.
-  try{
-    if(currentAudio){currentAudio.pause();currentAudio.removeAttribute('src');currentAudio.load();}
-    window.speechSynthesis?.cancel();
-  }catch(error){console.info('[NamuLab TTS] Previous playback cleanup:',error);}
-  currentAudio=null;
-  nativeUtterance=null;
-  const voice=lang==='ko'?'Seoyeon':'Brian';
-  const url=`https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text)}`;
-  let audio;
-  try{audio=new Audio(url);}catch(error){speakFallback(text,lang,serial);return;}
-  currentAudio=audio;
-  audio.preload='auto';
-  audio.playsInline=true;
-  let started=false;
-  let finished=false;
-  let timer=null;
-  function onlineStarted(){
-    if(serial!==speakingSerial)return;
-    started=true;
-    finished=true;
-    clearTimeout(timer);
-    // No warning or fallback once online sound has started playing.
-  }
-  function onlineFailed(error){
-    if(finished || started || serial!==speakingSerial)return;
-    finished=true;
-    clearTimeout(timer);
-    console.info('[NamuLab TTS] StreamElements unavailable, trying native TTS:',error?.message||error);
-    try{audio.pause();audio.removeAttribute('src');audio.load();}catch(e){}
-    speakFallback(text,lang,serial);
-  }
-  audio.addEventListener('playing',onlineStarted,{once:true});
-  audio.addEventListener('error',()=>onlineFailed(new Error('Audio stream failed')),{once:true});
-  timer=setTimeout(()=>onlineFailed(new Error('Online TTS timeout')),8000);
-  try{
-    const promise=audio.play();
-    if(promise && typeof promise.catch==='function')promise.catch(onlineFailed);
-  }catch(error){onlineFailed(error);}
+function speak(text, lang) {
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang === 'ko' ? 'ko-KR' : 'en-US';
+  u.rate = 0.9;
+  window.speechSynthesis.speak(u);
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
@@ -4235,49 +4169,82 @@ async function openShareProgress() {
     if(document.fonts && document.fonts.ready)await document.fonts.ready;
     const canvas=createShareCard();
     APP_STATE.shareCanvas=canvas;
+    // An ordinary <img src="data:image/png;base64,..."> is rendered in the
+    // modal so long-press / right-click saving also works without <a download>.
     APP_STATE.shareImage=canvas.toDataURL('image/png');
-    APP_STATE.shareFallbackText='';APP_STATE.modalMode='share';
+    APP_STATE.shareFallbackText='';
+    APP_STATE.shareSaveHint=false;
+    APP_STATE.modalMode='share';
     renderAll();haptic();
   }catch(error){console.warn('Share image unavailable',error);toast(t('shareFailed'));}
 }
-function downloadShareCard() {
-  try{
-    const canvas=APP_STATE.shareCanvas||createShareCard();
-    const anchor=document.createElement('a');
-    anchor.download='NamuLab_Progress.png';anchor.href=canvas.toDataURL('image/png');
-    document.body.appendChild(anchor);anchor.click();anchor.remove();
-  }catch(error){console.warn('PNG save error',error);toast(t('shareUnable'));}
+function shareCardFile() {
+  // Synchronous conversion keeps the browser's user gesture available
+  // for navigator.share() inside Telegram and mobile browsers.
+  if(typeof File!=='function' || typeof atob!=='function')return null;
+  const dataUrl=APP_STATE.shareImage || (APP_STATE.shareCanvas||createShareCard()).toDataURL('image/png');
+  const encoded=dataUrl.split(',')[1];
+  if(!encoded)throw new Error('PNG data is missing');
+  const binary=atob(encoded);
+  const bytes=new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+  return new File([bytes],'NamuLab_Progress.png',{type:'image/png'});
 }
-async function copyShareText(report) {
-  try{
-    if(navigator.clipboard && navigator.clipboard.writeText){await navigator.clipboard.writeText(report);toast(t('shareCopied'));return;}
-    const field=document.createElement('textarea');field.value=report;field.style.position='fixed';field.style.left='-9999px';
-    document.body.appendChild(field);field.select();const done=document.execCommand('copy');field.remove();
-    if(done){toast(t('shareCopied'));return;}
-    throw new Error('Clipboard unavailable');
-  }catch(error){APP_STATE.shareFallbackText=report;renderAll();toast(t('shareCopyFailed'));}
+function canSharePng(file) {
+  if(!file || typeof navigator.share!=='function')return false;
+  try {return typeof navigator.canShare!=='function' || navigator.canShare({files:[file]});}
+  catch(error){console.info('File sharing check unavailable',error);return false;}
 }
-async function sendShareCard() {
-  const report=buildShareText();
-  const useNativeShare=typeof navigator.share==='function' && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent||'') || (/Macintosh/i.test(navigator.userAgent||'') && navigator.maxTouchPoints>1));
-  if(useNativeShare){
-    try {
-      // Create a File synchronously before calling share(), preserving the click gesture.
-      const dataUrl=APP_STATE.shareImage || (APP_STATE.shareCanvas||createShareCard()).toDataURL('image/png');
-      if(typeof File==='function' && typeof atob==='function'){
-        const encoded=dataUrl.split(',')[1];
-        const decoded=atob(encoded);
-        const bytes=new Uint8Array(decoded.length);
-        for(let i=0;i<decoded.length;i++)bytes[i]=decoded.charCodeAt(i);
-        const file=new File([bytes],'NamuLab_Progress.png',{type:'image/png'});
-        if(!navigator.canShare || navigator.canShare({files:[file]})){
-          await navigator.share({title:'NamuLab',text:report,files:[file]});return;
-        }
+function showShareSaveHint() {
+  APP_STATE.shareSaveHint=true;
+  renderAll();
+}
+async function downloadShareCard() {
+  // Telegram WebView often ignores <a download>, so prefer the OS share sheet.
+  // The already rendered <img> remains available for manual long-press saving.
+  try {
+    const file=shareCardFile();
+    if(canSharePng(file)) {
+      try {
+        await navigator.share({files:[file],title:'NamuLab'});
+        return;
+      }catch(error){
+        if(error?.name==='AbortError')return;
+        console.info('Native PNG save/share unavailable',error);
       }
-      await navigator.share({title:'NamuLab',text:report});return;
-    }catch(error){if(error?.name==='AbortError')return;console.info('Native Share unavailable',error);}
-  }
-  await copyShareText(report);
+    }
+  }catch(error){console.info('PNG file conversion unavailable',error);}
+  showShareSaveHint();
+}
+function openTelegramProgressShare(report) {
+  const link='https://t.me/share/url?url='+encodeURIComponent('https://t.me/NamuLab_bot')+'&text='+encodeURIComponent(report);
+  try {
+    const tg=window.Telegram?.WebApp;
+    if(typeof tg?.openTelegramLink==='function') {
+      tg.openTelegramLink(link);
+      return;
+    }
+  }catch(error){console.info('Telegram share link unavailable in WebApp',error);}
+  // In a normal desktop browser open the Telegram forwarding URL directly.
+  const newWindow=window.open(link,'_blank','noopener,noreferrer');
+  if(!newWindow)window.location.href=link;
+}
+function sendShareCard() {
+  const report=buildShareText();
+  try {
+    const file=shareCardFile();
+    if(canSharePng(file)) {
+      // Call navigator.share immediately from the button click.
+      navigator.share({files:[file],text:report,title:'NamuLab'}).catch(error=>{
+        if(error?.name!=='AbortError'){
+          console.info('Native image share unavailable',error);
+          openTelegramProgressShare(report);
+        }
+      });
+      return;
+    }
+  }catch(error){console.info('PNG share unavailable',error);}
+  openTelegramProgressShare(report);
 }
 // ================================================================
 // Cloud sync. All visual output still comes from APP_STATE/renderAll().
