@@ -3797,17 +3797,67 @@ function completeLesson() {
 }
 function speak(text, lang) {
   if (!text) return;
+
   try {
     if (window.currentAudio) {
       window.currentAudio.pause();
-      window.currentAudio.currentTime = 0;
+      window.currentAudio.onerror = null;
+      window.currentAudio.onplaying = null;
     }
-    const cleanLang = lang === 'ko' ? 'ko' : 'en';
-    const audio = new Audio('https://namulab-bot.norpycmu.workers.dev/tts?lang=' + cleanLang + '&text=' + encodeURIComponent(text));
+
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+
+    const voice = lang === 'ko' ? 'Seoyeon' : 'Brian';
+    const audio = new Audio(
+      'https://api.streamelements.com/kappa/v2/speech?voice=' +
+      voice + '&text=' + encodeURIComponent(text)
+    );
     window.currentAudio = audio;
-    audio.play().catch(e => console.error('Audio play error:', e));
-  } catch (err) {
-    console.error(err);
+
+    let fallbackStarted = false;
+    let timeoutId = null;
+
+    const fallback = () => {
+      if (fallbackStarted || window.currentAudio !== audio) return;
+      fallbackStarted = true;
+      clearTimeout(timeoutId);
+      audio.onerror = null;
+      audio.onplaying = null;
+      audio.pause();
+
+      try {
+        if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') return;
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = lang === 'ko' ? 'ko-KR' : 'en-US';
+        window.speechSynthesis.speak(u);
+      } catch (error) {
+        console.error('Speech synthesis fallback:', error);
+      }
+    };
+
+    audio.onplaying = () => {
+      if (window.currentAudio !== audio || fallbackStarted) {
+        audio.pause();
+        return;
+      }
+      clearTimeout(timeoutId);
+    };
+    audio.onended = () => clearTimeout(timeoutId);
+    audio.onerror = fallback;
+    timeoutId = setTimeout(fallback, 2000);
+
+    try {
+      const playResult = audio.play();
+      if (playResult && typeof playResult.catch === 'function') {
+        playResult.catch(fallback);
+      }
+    } catch (error) {
+      fallback();
+    }
+  } catch (error) {
+    console.error('Audio initialization:', error);
   }
 }
 function openEditProfile() {
