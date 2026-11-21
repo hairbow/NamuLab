@@ -66,170 +66,14 @@
     The HTML is a functional client, not a secure replacement for that backend.
   -->
   <!--
-  ============================================================================
-  NAMULAB ADMIN: REQUIRED SERVER SETUP (copy into Supabase; NOT executed by HTML)
-  ============================================================================
-  1) SUPABASE SQL EDITOR -- create the public-read-only announcements table:
-
-  create table if not exists public.app_settings (
-    id integer primary key check (id=1),
-    announcement_text text not null default '',
-    is_active boolean not null default false,
-    updated_at timestamptz not null default now()
-  );
-  insert into public.app_settings(id,announcement_text,is_active)
-    values(1,'',false) on conflict (id) do nothing;
-  alter table public.app_settings enable row level security;
-  revoke all on table public.app_settings from anon, authenticated;
-  grant select on table public.app_settings to anon, authenticated;
-  drop policy if exists namulab_public_announcement on public.app_settings;
-  create policy namulab_public_announcement on public.app_settings
-    for select to anon, authenticated using (id=1);
-
-  Do not grant anon INSERT, UPDATE, or DELETE to app_settings or privileged
-  access to users. For all player edits, use ONLY the server-verified function.
-
-  2) SUPABASE EDGE FUNCTIONS -- deploy function named "namulab-admin".
-     Create file supabase/functions/namulab-admin/index.ts with the code below.
-     Set secrets TELEGRAM_BOT_TOKEN, ADMIN_PIN, and SUPABASE_SERVICE_ROLE_KEY
-     (or SUPABASE_SECRET_KEY). Never place the bot token or secret key in HTML.
-     Deploy with: supabase functions deploy namulab-admin --no-verify-jwt
-     The function itself authenticates every request using signed Telegram
-     initData, owner ID, and PIN; no open admin endpoint is provided.
-
-  ----- begin edge function index.ts -----
-  import { createClient } from 'npm:@supabase/supabase-js@2';
-
-  const OWNER_ID = '5283929866';
-  const HEADERS = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Content-Type': 'application/json'
-  };
-  const encoder = new TextEncoder();
-  function respond(body: unknown, status=200) {
-    return new Response(JSON.stringify(body), {status,headers:HEADERS});
-  }
-  async function signedHmac(key: Uint8Array, message: string) {
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw', key as BufferSource, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
-    return new Uint8Array(await crypto.subtle.sign('HMAC',cryptoKey,encoder.encode(message)));
-  }
-  function constantEqual(hex1:string, hex2:string) {
-    if(hex1.length!==hex2.length)return false;
-    let different=0;
-    for(let i=0;i<hex1.length;i++)different|=hex1.charCodeAt(i)^hex2.charCodeAt(i);
-    return different===0;
-  }
-  async function verifyTelegram(initData: string) {
-    const botToken=Deno.env.get('TELEGRAM_BOT_TOKEN');
-    if(!botToken||!initData||initData.length>16000)return false;
-    const params=new URLSearchParams(initData);
-    const received=params.get('hash')||'';
-    if(!/^[0-9a-f]{64}$/i.test(received))return false;
-    const authDate=Number(params.get('auth_date'));
-    const now=Math.floor(Date.now()/1000);
-    if(!Number.isSafeInteger(authDate)||authDate<now-86400||authDate>now+60)return false;
-    const rawUser=params.get('user');
-    if(!rawUser)return false;
-    let user;
-    try{user=JSON.parse(rawUser);}catch{return false;}
-    if(String(user?.id)!==OWNER_ID)return false;
-    const check=[...params.entries()]
-      .filter(([k])=>k!=='hash'&&k!=='signature')
-      .sort((a,b)=>a[0].localeCompare(b[0]))
-      .map(([k,v])=>`${k}=${v}`).join('\n');
-    const key=await signedHmac(encoder.encode('WebAppData'),botToken);
-    const hashed=await signedHmac(key,check);
-    const computed=[...hashed].map(b=>b.toString(16).padStart(2,'0')).join('');
-    return constantEqual(received.toLowerCase(),computed);
-  }
-
-  Deno.serve(async request=>{
-    if(request.method==='OPTIONS')return new Response(null,{status:204,headers:HEADERS});
-    if(request.method!=='POST')return respond({ok:false,error:'Method not allowed'},405);
-    try{
-      const body=await request.json();
-      const pin=Deno.env.get('ADMIN_PIN');
-      if(!pin||body?.pin!==pin||!await verifyTelegram(String(body?.initData||'')))
-        return respond({ok:false,error:'Forbidden'},403);
-      const url=Deno.env.get('SUPABASE_URL');
-      const secret=Deno.env.get('SUPABASE_SECRET_KEY')||Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-      if(!url||!secret)return respond({ok:false,error:'Missing backend secrets'},500);
-      const db=createClient(url,secret,{auth:{persistSession:false,autoRefreshToken:false}});
-      const action=String(body.action||'');
-      const userId=String(body.user_id||'').slice(0,100);
-      if(action==='verify'){
-        const {count,error}=await db.from('users').select('user_id',{count:'exact',head:true});
-        if(error)throw error;
-        return respond({ok:true,totalUsers:count||0});
-      }
-      if(action==='list_players'){
-        const offset=Math.max(0,Math.min(1000000,Number(body.offset)||0));
-        const limit=Math.max(1,Math.min(50,Number(body.limit)||30));
-        const {data,count,error}=await db.from('users')
-          .select('user_id,nickname,country,eco,streak,updated_at',{count:'exact'})
-          .order('updated_at',{ascending:false})
-          .range(offset,offset+limit-1);
-        if(error)throw error;
-        return respond({ok:true,players:data||[],total:count||0});
-      }
-      if(action==='set_announcement'){
-        const text=String(body.announcement_text||'').trim().slice(0,1500);
-        const active=body.is_active===true && text.length>0;
-        const updated_at=new Date().toISOString();
-        const {error}=await db.from('app_settings').upsert({
-          id:1,announcement_text:text,is_active:active,updated_at
-        },{onConflict:'id'});
-        if(error)throw error;
-        return respond({ok:true,updated_at});
-      }
-      if(!/^((tg_[0-9]{1,20})|(web_[A-Za-z0-9-]{12,90}))$/.test(userId))
-        return respond({ok:false,error:'Invalid user_id'},400);
-      if(action==='delete_user'){
-        const {error}=await db.from('users').delete().eq('user_id',userId);
-        if(error)throw error;
-        return respond({ok:true});
-      }
-      if(action==='set_eco'||action==='reset_nick'){
-        const {data:existing,error:readError}=await db.from('users')
-          .select('user_id,nickname,state_json').eq('user_id',userId).maybeSingle();
-        if(readError)throw readError;
-        if(!existing)return respond({ok:false,error:'User not found'},404);
-        const state=existing.state_json&&typeof existing.state_json==='object'
-          && !Array.isArray(existing.state_json)?{...existing.state_json}:{};
-        const changes:{[key:string]:unknown}={updated_at:new Date().toISOString()};
-        if(action==='set_eco'){
-          const eco=Number(body.eco);
-          if(!Number.isSafeInteger(eco)||eco<0||eco>1000000000)
-            return respond({ok:false,error:'Invalid ECO amount'},400);
-          state.eco=eco;
-          changes.eco=eco;
-        }else{
-          // A unique, nonempty placeholder keeps the nickname UNIQUE and NOT NULL.
-          const freshNick=`Guest_${crypto.randomUUID().replace(/-/g,'').slice(0,14)}`;
-          state.nickname=freshNick;
-          changes.nickname=freshNick;
-        }
-        changes.state_json=state;
-        const {error}=await db.from('users').update(changes).eq('user_id',userId);
-        if(error)throw error;
-        return respond({ok:true});
-      }
-      return respond({ok:false,error:'Unknown action'},400);
-    }catch(error){
-      console.error('NamuLab admin action failed',error);
-      return respond({ok:false,error:'Server error'},500);
-    }
-  });
-  ----- end edge function index.ts -----
-
-  IMPORTANT: a publishable Supabase key + a local PIN never authorize admin
-  writes. This gateway is intentionally required for mutations. Existing
-  browser-local ECO syncing still needs its own verified user auth + RLS before
-  the leaderboard can be trusted in an adversarial public environment.
-  ============================================================================
+    NamuLab: public.app_settings must contain row id=1 with columns
+    id (integer), announcement_text (text), is_active (boolean).
+    Admin UI PIN opens the panel, but it cannot grant PostgreSQL permissions.
+    Supabase RLS and GRANTs control who can UPDATE public.app_settings/users.
+    Do NOT grant anonymous public UPDATE/DELETE to these tables simply to make
+    this demo admin panel work: the PIN is visible in the delivered HTML.
+    Production management requires Supabase Auth + an owner-only RLS policy
+    (or other server-verified authorization), without exposing secret keys.
   -->
   <!-- Official Supabase JavaScript v2 SDK; no build step required. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -289,6 +133,7 @@
     .bottom-nav { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; background:#0e2a21; border:1px solid #ffffff12; border-radius:20px; padding:6px; }
     .bottom-nav button { display:flex; flex-direction:column; gap:4px; align-items:center; justify-content:center; min-height:58px; color:#7ca698; border:0; border-radius:15px; background:transparent; font-size:11px; font-weight:800; }
     .bottom-nav button.active { color:#c8ff86; background:#28563b; }
+    .country-flag {display:inline-block;vertical-align:middle;flex:none;border-radius:2.5px;overflow:hidden;box-shadow:0 1px 4px #0005;}
     .country-option { width:100%; display:flex; align-items:center; gap:13px; padding:14px; border:1px solid #ffffff18; border-radius:16px; background:#103026; color:#effff2; text-align:left; }
     .country-option.active { border-color:#b5fb82; background:#264837; box-shadow:inset 0 0 0 1px #b5fb8230; }
     .country-option .check { width:19px; height:19px; border:1px solid #8bb4a1; border-radius:50%; margin-left:auto; flex:none; }
@@ -297,7 +142,7 @@
     .input-text::placeholder { color:#698b7f; }
     .modal-overlay { position:fixed; z-index:30; inset:0; background:#010907c9; backdrop-filter:blur(11px); display:flex; align-items:center; justify-content:center; padding:20px; }
     .modal-panel { width:min(100%,450px); max-height:calc(100dvh - 40px); overflow-y:auto; padding:25px; border-radius:29px; border:1px solid #b9ffa73c; background:linear-gradient(165deg,#174436,#071d18 70%); box-shadow:0 25px 90px #000b; }
-    .toast { position:fixed; z-index:60; left:50%; bottom:105px; transform:translate(-50%,20px); opacity:0; pointer-events:none; background:#c7ff88; color:#092019; font-weight:800; white-space:nowrap; padding:12px 18px; border-radius:13px; box-shadow:0 10px 30px #0006; transition:.25s; }
+    .toast { position:fixed; z-index:60; left:50%; bottom:105px; transform:translate(-50%,20px); opacity:0; pointer-events:none; background:#c7ff88; color:#092019; font-weight:800; white-space:normal; overflow-wrap:anywhere; max-width:min(92vw,470px); text-align:center; padding:12px 18px; border-radius:13px; box-shadow:0 10px 30px #0006; transition:.25s; font-size:12px; }
     .toast.show { opacity:1; transform:translate(-50%,0); }
     @media (max-width:355px) { .app-content,.sticky-header{padding-left:14px;padding-right:14px} .stat-pill{padding:8px;font-size:11px} .lang-switch button{padding:6px} .card-face{padding:18px} .section-title{font-size:27px} }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
@@ -459,11 +304,9 @@
   <script>
 'use strict';
 
-// Owner recognition for UI only. PIN is never a substitute for server security.
-// All privileged writes MUST be verified by the namulab-admin Edge Function.
+// Admin entry is UI-only. Browser PIN is visible in source and does NOT bypass Supabase RLS.
 const ADMIN_TG_ID = [5283929866];
 const ADMIN_PIN = '7777';
-const ADMIN_FUNCTION_NAME = 'namulab-admin';
 
 // ================================================================
 // TERMS_DB — САМАЯ ПРОСТАЯ ЧАСТЬ ДЛЯ РАСШИРЕНИЯ БАЗЫ.
@@ -2786,9 +2629,9 @@ const FINAL_RELEASE_UI = {
 };
 for(const lang of ['ru','en','ko'])Object.assign(UI[lang],FINAL_RELEASE_UI[lang]);
 const CLOUD_UI = {
-  ru:{cloudRefresh:'Обновить',cloudSynced:'Синхронизировано с облаком',cloudConnecting:'Подключение к облаку…',cloudSyncing:'Сохраняем в облако…',cloudOffline:'Офлайн · прогресс сохранён на устройстве',cloudError:'Облако недоступно · работаем локально',cloudRefreshDone:'Общий рейтинг обновлён',cloudRefreshFail:'Сейчас не удалось обновить рейтинг',cloudRankingSub:'Реальные игроки и 10 демонстрационных участников',cloudDemo:'10 участников с пометкой DEMO — пример; остальные записи загружаются из Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ОНЛАЙН',cloudNoServer:'Не удаётся подключиться к Supabase. Твои данные остаются на устройстве.',cloudRestored:'Прогресс загружен из облака',cloudLoadingLeaderboard:'Загружаем игроков…'},
-  en:{cloudRefresh:'Refresh',cloudSynced:'Synced with cloud',cloudConnecting:'Connecting to cloud…',cloudSyncing:'Saving to cloud…',cloudOffline:'Offline · progress saved on this device',cloudError:'Cloud unavailable · local mode',cloudRefreshDone:'Global leaderboard updated',cloudRefreshFail:'Could not refresh leaderboard right now',cloudRankingSub:'Real players and 10 demo participants',cloudDemo:'10 DEMO players are examples; other entries come from Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ONLINE',cloudNoServer:'Supabase is unavailable. Your progress is still saved locally.',cloudRestored:'Progress restored from cloud',cloudLoadingLeaderboard:'Loading players…'},
-  ko:{cloudRefresh:'새로고침',cloudSynced:'클라우드 동기화 완료',cloudConnecting:'클라우드 연결 중…',cloudSyncing:'클라우드에 저장 중…',cloudOffline:'오프라인 · 이 기기에 학습 기록을 저장했어요',cloudError:'클라우드 연결 불가 · 기기에서 계속 학습할 수 있어요',cloudRefreshDone:'전체 순위를 새로 불러왔어요',cloudRefreshFail:'지금은 순위를 새로 불러올 수 없어요',cloudRankingSub:'실제 사용자와 체험용 참가자 10명',cloudDemo:'DEMO 표시가 있는 10명은 예시 사용자이며, 나머지는 Supabase에서 불러와요.',cloudDemoBadge:'DEMO',cloudRealBadge:'온라인',cloudNoServer:'Supabase에 연결할 수 없어요. 학습 기록은 기기에 안전하게 남아 있어요.',cloudRestored:'클라우드에 저장된 학습 기록을 불러왔어요',cloudLoadingLeaderboard:'참가자 정보를 불러오는 중…'}
+  ru:{cloudSchemaMissing:'В таблице users нет state_json: изученные слова и результаты тестов будут сохраняться только на устройстве.',cloudRefresh:'Обновить',cloudSynced:'Синхронизировано с облаком',cloudConnecting:'Подключение к облаку…',cloudSyncing:'Сохраняем в облако…',cloudOffline:'Офлайн · прогресс сохранён на устройстве',cloudError:'Облако недоступно · работаем локально',cloudRefreshDone:'Общий рейтинг обновлён',cloudRefreshFail:'Сейчас не удалось обновить рейтинг',cloudRankingSub:'Реальные игроки и 10 демонстрационных участников',cloudDemo:'10 участников с пометкой DEMO — пример; остальные записи загружаются из Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ОНЛАЙН',cloudNoServer:'Не удаётся подключиться к Supabase. Твои данные остаются на устройстве.',cloudRestored:'Прогресс загружен из облака',cloudLoadingLeaderboard:'Загружаем игроков…'},
+  en:{cloudSchemaMissing:'users.state_json is missing: learned terms and exam results will only be stored on this device.',cloudRefresh:'Refresh',cloudSynced:'Synced with cloud',cloudConnecting:'Connecting to cloud…',cloudSyncing:'Saving to cloud…',cloudOffline:'Offline · progress saved on this device',cloudError:'Cloud unavailable · local mode',cloudRefreshDone:'Global leaderboard updated',cloudRefreshFail:'Could not refresh leaderboard right now',cloudRankingSub:'Real players and 10 demo participants',cloudDemo:'10 DEMO players are examples; other entries come from Supabase.',cloudDemoBadge:'DEMO',cloudRealBadge:'ONLINE',cloudNoServer:'Supabase is unavailable. Your progress is still saved locally.',cloudRestored:'Progress restored from cloud',cloudLoadingLeaderboard:'Loading players…'},
+  ko:{cloudSchemaMissing:'users 테이블에 state_json 열이 없어요. 학습 기록과 시험 결과는 이 기기에만 저장돼요.',cloudRefresh:'새로고침',cloudSynced:'클라우드 동기화 완료',cloudConnecting:'클라우드 연결 중…',cloudSyncing:'클라우드에 저장 중…',cloudOffline:'오프라인 · 이 기기에 학습 기록을 저장했어요',cloudError:'클라우드 연결 불가 · 기기에서 계속 학습할 수 있어요',cloudRefreshDone:'전체 순위를 새로 불러왔어요',cloudRefreshFail:'지금은 순위를 새로 불러올 수 없어요',cloudRankingSub:'실제 사용자와 체험용 참가자 10명',cloudDemo:'DEMO 표시가 있는 10명은 예시 사용자이며, 나머지는 Supabase에서 불러와요.',cloudDemoBadge:'DEMO',cloudRealBadge:'온라인',cloudNoServer:'Supabase에 연결할 수 없어요. 학습 기록은 기기에 안전하게 남아 있어요.',cloudRestored:'클라우드에 저장된 학습 기록을 불러왔어요',cloudLoadingLeaderboard:'참가자 정보를 불러오는 중…'}
 };
 for(const lang of ['ru','en','ko'])Object.assign(UI[lang],CLOUD_UI[lang]);
 // One localized set of labels for the new nickname reservation flow.
@@ -2808,9 +2651,9 @@ UI.ko.editSub='닉네임과 국가는 이 기기에 저장되며, 인터넷에 �
 // Admin-panel labels. The public learning app has no new navigation tabs.
 const ADMIN_UI = {
   ru:{adminButton:'🛡️ Admin Panel',adminTitle:'Панель администратора',adminSubtitle:'Управление NamuLab',
-    adminPINTitle:'Вход администратора',adminPINHint:'Введите PIN. Изменение данных игроков доступно только владельцу через Telegram.',
+    adminPINTitle:'Вход администратора',adminPINHint:'Введите PIN для открытия панели. Запись в Supabase дополнительно регулируется RLS.',
     adminPINLabel:'PIN-код',adminPINEnter:'Войти',adminPINWrong:'Неверный PIN-код.',
-    adminOwnerOnly:'Администрирование доступно только владельцу внутри Telegram. Ссылка ?admin=1 открывает форму, но не даёт прав.',
+    adminOwnerOnly:'PIN открывает интерфейс, но не является защитой базы: реальные права контролируются Supabase RLS.',
     adminNoServer:'Для управления требуется защищённая функция Supabase namulab-admin. Проверьте её установку и подключение.',
     adminForbidden:'Доступ не подтверждён. Проверьте Telegram-аккаунт и серверные настройки.',
     adminOverview:'Обзор',adminAnnouncement:'📢 Объявление',adminPlayers:'👥 Игроки',adminPlayersCount:'Зарегистрированных игроков',
@@ -2824,11 +2667,11 @@ const ADMIN_UI = {
     adminConfirm:'Подтвердить',adminSaved:'Изменения сохранены в Supabase',adminError:'Не удалось выполнить действие. Попробуйте позже.',
     adminRefresh:'Обновить',adminOffline:'Облако сейчас недоступно',adminClose:'Закрыть',adminOwnerBadge:'Только владелец',
     announcementDismiss:'Закрыть объявление',adminPage:'Страница',adminEmptyAnnouncement:'Текст пока не опубликован',
-    adminServerSetup:'Для административных действий требуется защищённая Edge Function. Код и настройки описаны в комментарии в начале HTML.'},
+    adminServerSetup:'PIN открывает панель, но доступ к записям определяют права Supabase (RLS). Не открывайте анонимным пользователям изменение ECO, никнеймов или объявлений.'},
   en:{adminButton:'🛡️ Admin Panel',adminTitle:'Admin Panel',adminSubtitle:'Manage NamuLab',
-    adminPINTitle:'Administrator sign-in',adminPINHint:'Enter your PIN. Player management requires verified Telegram owner identity.',
+    adminPINTitle:'Administrator sign-in',adminPINHint:'Enter your PIN to open the panel. Supabase RLS still controls database writes.',
     adminPINLabel:'PIN',adminPINEnter:'Sign in',adminPINWrong:'Incorrect PIN.',
-    adminOwnerOnly:'Only the Telegram owner can administer this app. ?admin=1 shows the form, but grants no access.',
+    adminOwnerOnly:'The PIN unlocks only the interface; secure database permissions must be enforced by Supabase RLS.',
     adminNoServer:'The secure Supabase namulab-admin function is required. Check its deployment and connection.',
     adminForbidden:'Access could not be verified. Check your Telegram account and server setup.',
     adminOverview:'Overview',adminAnnouncement:'📢 Announcement',adminPlayers:'👥 Players',adminPlayersCount:'Registered players',
@@ -2842,11 +2685,11 @@ const ADMIN_UI = {
     adminConfirm:'Confirm',adminSaved:'Changes saved in Supabase',adminError:'Action failed. Please try again later.',
     adminRefresh:'Refresh',adminOffline:'Cloud unavailable',adminClose:'Close',adminOwnerBadge:'Owner only',
     announcementDismiss:'Dismiss announcement',adminPage:'Page',adminEmptyAnnouncement:'No announcement published yet',
-    adminServerSetup:'A secure Edge Function is required for admin actions. Setup code is documented at the start of the HTML.'},
+    adminServerSetup:'The PIN opens this panel; Supabase permissions (RLS) control database writes. Never allow anonymous players to edit ECO, nicknames, or announcements.'},
   ko:{adminButton:'🛡️ 관리자 패널',adminTitle:'관리자 패널',adminSubtitle:'NamuLab 운영 관리',
-    adminPINTitle:'관리자 로그인',adminPINHint:'PIN을 입력해 주세요. 회원 정보 관리는 텔레그램 계정으로 소유자 인증을 완료해야 이용할 수 있어요.',
+    adminPINTitle:'관리자 로그인',adminPINHint:'관리자 PIN을 입력하면 패널이 열려요. 실제 저장 권한은 Supabase RLS에서 관리해요.',
     adminPINLabel:'PIN 번호',adminPINEnter:'로그인',adminPINWrong:'PIN 번호가 올바르지 않아요.',
-    adminOwnerOnly:'텔레그램으로 인증된 소유자만 관리할 수 있어요. ?admin=1은 로그인 화면만 표시해요.',
+    adminOwnerOnly:'PIN은 관리 화면만 열어 줘요. 데이터베이스 권한은 반드시 Supabase RLS로 보호해야 해요.',
     adminNoServer:'Supabase의 보안 함수 namulab-admin이 필요해요. 배포 및 연결 상태를 확인해 주세요.',
     adminForbidden:'관리자 권한을 확인하지 못했어요. 텔레그램 계정과 서버 설정을 확인해 주세요.',
     adminOverview:'현황',adminAnnouncement:'📢 공지사항',adminPlayers:'👥 회원 관리',adminPlayersCount:'등록된 회원',
@@ -2860,7 +2703,7 @@ const ADMIN_UI = {
     adminConfirm:'확인',adminSaved:'Supabase에 변경 사항을 저장했어요.',adminError:'처리하지 못했어요. 잠시 후 다시 시도해 주세요.',
     adminRefresh:'새로고침',adminOffline:'현재 클라우드에 연결할 수 없어요.',adminClose:'닫기',adminOwnerBadge:'소유자 전용',
     announcementDismiss:'공지 닫기',adminPage:'페이지',adminEmptyAnnouncement:'아직 게시된 공지가 없어요.',
-    adminServerSetup:'관리자 기능에는 보안 Edge Function이 필요해요. HTML 상단의 주석에 설치 방법이 있어요.'}
+    adminServerSetup:'PIN을 입력하면 화면은 열리지만, 실제 저장 권한은 Supabase RLS가 결정해요. 익명 사용자에게 ECO, 닉네임, 공지 수정 권한을 열어 두지 마세요.'}
 };
 for(const lang of ['ru','en','ko'])Object.assign(UI[lang],ADMIN_UI[lang]);
 
@@ -2869,7 +2712,17 @@ const PREV_V3_STORAGE_KEY = 'namulab_v3_v1';
 const PREV_STORAGE_KEY = 'namulab_v2_v1';
 const FIRST_STORAGE_KEY = 'namulab_step1_v1';
 const COUNTRIES = ['KZ','KR','US'];
-const COUNTRY_FLAGS = {KZ:'🇰🇿',KR:'🇰🇷',US:'🇺🇸'};
+// Crisp flag icons are drawn as inline SVG (no emoji fonts or remote assets).
+const FLAG_SVGS={
+  KZ:`<rect width="36" height="26" fill="#00AFC8"/><path d="M4 0v26" stroke="#F9D24B" stroke-width="1.8" stroke-dasharray="2.2 1"/><circle cx="19.3" cy="10.5" r="4.1" fill="#F7CB42"/><g stroke="#F7CB42" stroke-width=".9"><path d="M19.3 3.2v2M19.3 15.7v2M12 10.5h2M24.6 10.5h2M14.2 5.4l1.6 1.6M22.8 14l1.6 1.6M24.4 5.4 22.8 7M15.8 14l-1.6 1.6"/></g><path d="M10.5 17c5.3 3.1 12.3 3.1 17.6 0-2.8 3.6-5.3 2.8l-3.5 3-3.5-3c-2.6.8-3.5.3-5.3-2.8Z" fill="#F7CB42"/>`,
+  KR:`<rect width="36" height="26" fill="#FFFFFF"/><circle cx="18" cy="13" r="6.5" fill="#CD2E3A"/><path d="M11.5 13a3.25 3.25 0 0 1 6.5 0 3.25 3.25 0 0 0 6.5 0 6.5 6.5 0 0 1-13 0" fill="#0047A0"/><g stroke="#111" stroke-width="1.5"><path d="m5.2 5.1 4 4M6.7 3.6l4 4M3.7 6.6l4 4M26.8 17.1l4.1 4.1M28.3 15.6l4.1 4.1M25.3 18.6l4.1 4.1"/><path d="m26.8 8.9 4.1-4.1M28.3 10.4l4.1-4.1M25.3 7.4l4.1-4.1M5.2 20.9l4-4M6.7 22.4l4-4M3.7 19.4l4-4"/></g>`,
+  US:`<rect width="36" height="26" fill="#fff"/>${Array.from({length:7},(_,i)=>`<rect y="${i*4}" width="36" height="2" fill="#B22234"/>`).join('')}<rect width="15.2" height="14" fill="#3C3B6E"/>${Array.from({length:5},(_,r)=>Array.from({length:6},(_,c)=>`<circle cx="${1.4+c*2.4+(r%2?0.8:0)}" cy="${1.6+r*2.6}" r=".48" fill="#fff"/>`).join('')).join('')}`
+};
+function flagSVG(code,width=18,height=13){
+  const k=COUNTRIES.includes(code)?code:null;
+  if(!k)return '<span aria-hidden="true">🌐</span>';
+  return `<svg class="country-flag" width="${Number(width)||18}" height="${Number(height)||13}" viewBox="0 0 36 26" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${k}" focusable="false"><g>${FLAG_SVGS[k]}</g><rect x=".3" y=".3" width="35.4" height="25.4" rx="3.2" fill="none" stroke="#ffffff" stroke-opacity=".24" stroke-width=".6"/></svg>`;
+}
 const REWARDS = {1:10,2:15,3:25};
 const DEMO_PLAYERS = [
   {name:'Aigerim',country:'KZ',eco:1220,streak:18},
@@ -2914,15 +2767,15 @@ function getStableUserId() {
 const USER_ID=getStableUserId();
 const CLOUD_LOCAL_KEY='namulab_cloud_state_v1_'+USER_ID;
 const LEGACY_MIGRATION_OWNER_KEY='namulab_legacy_migration_owner_v1';
-let SUPABASE_CLIENT=null;
-try {
-  if(window.supabase?.createClient) {
-    SUPABASE_CLIENT=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{
+const sbClient=(()=>{
+  try {
+    if(typeof window.supabase?.createClient!=='function')throw new Error('Supabase JS v2 SDK did not load from CDN');
+    return window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{
       auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false},
-      global:{headers:{'X-Client-Info':'namulab-miniapp-v1'}}
+      global:{headers:{'X-Client-Info':'namulab-miniapp-v2'}}
     });
-  }
-} catch(error) {console.warn('Supabase SDK not available:',error);}
+  } catch(error) {console.error('[NamuLab Supabase init]',error?.message||error);return null;}
+})();
 
 
 const defaultState = {
@@ -3041,16 +2894,16 @@ function loadState() {
 // ЕДИНСТВЕННЫЙ ИСТОЧНИК ИСТИНЫ: все данные и видимые режимы находятся здесь.
 const APP_STATE = Object.assign(loadState(),{
   flipped:false,modalMode:null,draftCountry:null,draftNickname:'',
-  nicknameChecking:false,nicknameErrorKey:null,nicknameCheckSerial:0,searchQuery:'',
+  nicknameChecking:false,nicknameErrorKey:null,nicknameErrorDetail:null,nicknameCheckSerial:0,searchQuery:'',
   searchResult:null,searchLoading:false,searchErrorKey:null,searchSuggestions:[],requestSerial:0,
   requestController:null,focusTermId:null,shareImage:null,shareCanvas:null,shareFallbackText:'',
-  cloudStatus: SUPABASE_CLIENT ? 'connecting' : 'offline',cloudPlayers:[],
+  cloudStatus: sbClient ? 'connecting' : 'offline',cloudPlayers:[],
   cloudTotals:{KZ:0,KR:0,US:0},cloudTotalsAvailable:false,
   cloudSelfAtTotals:null,cloudRefreshing:false,cloudLastSyncedAt:null,
   announcement:null,announcementDismissedKey:null,announcementLoading:false,
   adminVerified:false,adminPINErrorKey:null,adminPINBusy:false,adminTab:'overview',
   adminPINInput:'',adminNoticeText:'',adminNoticeActive:false,adminBusy:false,
-  adminErrorKey:null,adminPlayers:[],adminTotalPlayers:0,adminPage:0,adminPageSize:30,
+  adminErrorKey:null,adminErrorDetail:null,adminPlayers:[],adminTotalPlayers:0,adminPage:0,adminPageSize:30,
   adminEditUserId:null,adminEcoInput:'',adminConfirm:null,adminLastUpdated:null
 });
 APP_STATE.modalMode=APP_STATE.country && APP_STATE.nickname ? null : 'onboarding';
@@ -3190,7 +3043,7 @@ function renderHeader() {
       <div class="stat-pill"><span>🌱</span><span>${localeNumber(APP_STATE.eco)} ECO</span></div>
       <div class="stat-pill"><span>🔥</span><span>${localeNumber(effectiveStreak())} ${streakUnit(effectiveStreak())}</span></div>
       <div class="ml-auto min-w-0 max-w-[45%] text-right text-xs muted font-semibold top-header-name" title="${esc(APP_STATE.nickname)}">
-        ${APP_STATE.country ? `${COUNTRY_FLAGS[APP_STATE.country]} ${esc(APP_STATE.nickname)}` : '🌏 NamuLab'}
+        ${APP_STATE.country ? `${flagSVG(APP_STATE.country)} ${esc(APP_STATE.nickname)}` : '🌏 NamuLab'}
       </div>
     </div>`;
 }
@@ -3398,7 +3251,7 @@ function renderRanking() {
         <div class="min-w-0"><h2 class="font-extrabold text-lg">${t('countryBattle')}</h2><p class="muted text-xs">${t('cloudRankingSub')}</p></div>
       </div>
       ${COUNTRIES.map(country=>`<div class="battle-row">
-        <div class="text-sm font-bold break-words min-w-0">${COUNTRY_FLAGS[country]} ${t('countryNames')[country]} ${country===APP_STATE.country?'<span class="text-lime-200 text-[10px]">✦</span>':''}</div>
+        <div class="text-sm font-bold break-words min-w-0">${flagSVG(country)} ${t('countryNames')[country]} ${country===APP_STATE.country?'<span class="text-lime-200 text-[10px]">✦</span>':''}</div>
         <div class="text-sm font-extrabold tabular-nums">${localeNumber(totals[country])} <span class="muted text-xs">ECO</span></div>
         <div class="progress-track"><div class="progress-fill" style="width:${totals[country]/highest*100}%;background:${colors[country]}"></div></div>
       </div>`).join('')}
@@ -3414,7 +3267,7 @@ function renderRanking() {
           <div class="w-5 text-center text-xs font-bold ${index<3?'text-lime-200':'muted'}">${index===0?'🥇':index===1?'🥈':index===2?'🥉':index+1}</div>
           <div class="avatar">${esc((player.name||'?').slice(0,1).toUpperCase())}</div>
           <div class="min-w-0 flex-1"><div class="truncate text-sm font-bold" title="${esc(player.name)}">${esc(player.name)} ${player.you?`<span class="text-lime-200 text-[10px]">(${t('you')})</span>`:''}</div>
-            <div class="muted text-[11px] mt-1 truncate">${COUNTRY_FLAGS[player.country]||'🌍'} ${t('countryNames')[player.country]||''} ${player.demo?`<span class="text-lime-200/70 text-[9px]">· ${t('cloudDemoBadge')}</span>`:''}</div>
+            <div class="muted text-[11px] mt-1 truncate">${flagSVG(player.country)} ${t('countryNames')[player.country]||''} ${player.demo?`<span class="text-lime-200/70 text-[9px]">· ${t('cloudDemoBadge')}</span>`:''}</div>
           </div>
           <div class="text-right flex-none"><div class="font-extrabold text-[13px]">${localeNumber(APP_STATE.sortBy==='eco'?player.eco:player.streak)} <span class="text-lime-200 text-[10px]">${APP_STATE.sortBy==='eco'?'ECO':'🔥'}</span></div>
             <div class="muted text-[11px] mt-1">${APP_STATE.sortBy==='eco'?'🔥 '+localeNumber(player.streak)+' '+t('days'):'🌱 '+localeNumber(player.eco)+' ECO'}</div>
@@ -3521,10 +3374,10 @@ function renderProfile() {
     <p class="muted text-sm mt-2">${t('profileSub')}</p>
     <div class="glass rounded-[27px] mt-7 p-6 text-center relative overflow-hidden">
       <div class="orbit" style="top:-150px;right:-80px"></div>
-      <div class="relative mx-auto w-24 h-24 rounded-[27px] bg-[#27523e] border border-lime-200/25 grid place-items-center text-5xl">${COUNTRY_FLAGS[APP_STATE.country]||'🌏'}</div>
+      <div class="relative mx-auto w-24 h-24 rounded-[27px] bg-[#27523e] border border-lime-200/25 grid place-items-center">${flagSVG(APP_STATE.country,52,38)}</div>
       <h2 class="relative mt-5 text-2xl font-extrabold break-words">${esc(APP_STATE.nickname)}</h2>
       <p class="relative eyebrow mt-2">${t('explorer')}</p>
-      <div class="relative flex justify-center items-center gap-2 mt-4"><span class="rounded-full bg-lime-100/10 border border-lime-100/20 text-lime-200 px-3 py-1.5 text-xs font-bold">${COUNTRY_FLAGS[APP_STATE.country]||'🌏'} ${t('countryNames')[APP_STATE.country]||''}</span></div>
+      <div class="relative flex justify-center items-center gap-2 mt-4"><span class="rounded-full bg-lime-100/10 border border-lime-100/20 text-lime-200 px-3 py-1.5 text-xs font-bold">${flagSVG(APP_STATE.country)} ${t('countryNames')[APP_STATE.country]||''}</span></div>
     </div>
     <div class="grid grid-cols-2 gap-3 mt-4">
       <div class="glass rounded-[20px] p-5"><div class="text-2xl mb-3">📚</div><div class="text-2xl font-extrabold">${localeNumber(APP_STATE.learnedIds.length)} <span class="text-sm muted">/ ${TERMS_DB.length}</span></div><div class="muted text-xs mt-2">${t('learnedWords')}</div></div>
@@ -3582,7 +3435,7 @@ function renderAdminPanel(){
     <div class="admin-tabs" role="tablist" aria-label="${t('adminTitle')}">
       ${['overview','announcement','players'].map(id=>`<button type="button" role="tab" data-admin-tab="${id}" class="${tab===id?'active':''}" aria-selected="${tab===id}">${id==='overview'?'📊 ':''}${t(id==='overview'?'adminOverview':id==='announcement'?'adminAnnouncement':'adminPlayers')}</button>`).join('')}
     </div>
-    ${APP_STATE.adminErrorKey?`<div class="admin-message mt-4" role="alert">${esc(t(APP_STATE.adminErrorKey))}</div>`:''}
+    ${APP_STATE.adminErrorKey?`<div class="admin-message mt-4" role="alert">${esc(t(APP_STATE.adminErrorKey))}${APP_STATE.adminErrorDetail?`<div class="mt-1 opacity-80">${esc(APP_STATE.adminErrorDetail)}</div>`:''}</div>`:''}
     ${tab==='overview'?`<div class="grid grid-cols-2 gap-3 mt-4">
       <div class="glass rounded-2xl p-4"><div class="admin-number">${localeNumber(APP_STATE.adminTotalPlayers)}</div><div class="muted text-xs mt-2">${t('adminPlayersCount')}</div></div>
       <div class="glass rounded-2xl p-4"><div class="text-[23px] mb-1">${APP_STATE.announcement?.is_active?'📢':'🔕'}</div><div class="text-sm font-extrabold">${t(APP_STATE.announcement?.is_active?'adminOn':'adminOff')}</div><div class="muted text-xs mt-1">${t('adminAnnouncementStatus')}</div></div>
@@ -3601,7 +3454,7 @@ function renderAdminPanel(){
         <button type="button" class="cloud-refresh" data-action="adminRefresh" ${busy?'disabled':''}>🔄 ${t('adminRefresh')}</button></div>
       ${!all.length?`<div class="glass rounded-xl p-6 text-center text-sm muted mt-3">${busy?t('adminLoading'):t('adminNone')}</div>`:''}
       ${all.map(player=>`<div class="admin-player-row" data-user-id="${esc(player.id)}">
-        <div class="flex items-center gap-2"><span class="text-xl shrink-0">${COUNTRY_FLAGS[player.country]||'🌍'}</span>
+        <div class="flex items-center gap-2"><span class="text-xl shrink-0">${flagSVG(player.country)}</span>
           <div class="min-w-0 flex-1"><div class="font-extrabold text-sm break-words">${esc(player.name)}</div>
             <div class="muted text-[10px] break-words">${esc(player.id)} · ${player.country||'—'}</div></div>
           <span class="text-lime-200 font-extrabold text-xs mini-number">${localeNumber(player.eco)} ECO</span></div>
@@ -3671,11 +3524,11 @@ function renderModal() {
     <p class="muted text-sm leading-6 mt-3 mb-7">${first?t('welcomeSub'):t('editSub')}</p>
     <div class="eyebrow mb-3">${t('countrySelect')}</div>
     <div class="grid gap-2">${COUNTRIES.map(country => `<button type="button" class="country-option ${APP_STATE.draftCountry === country ? 'active' : ''}" data-country="${country}" aria-pressed="${APP_STATE.draftCountry === country}" ${APP_STATE.nicknameChecking?'disabled':''}>
-      <span class="text-3xl">${COUNTRY_FLAGS[country]}</span><span class="text-sm font-bold">${t('countryNames')[country]}</span><span class="check"></span>
+      <span class="flex-none">${flagSVG(country)}</span><span class="text-sm font-bold">${t('countryNames')[country]}</span><span class="check"></span>
     </button>`).join('')}</div>
     <label for="nicknameInput" class="block eyebrow mt-7 mb-3">${t('nickname')}</label>
     <input id="nicknameInput" class="input-text" type="text" maxlength="22" autocomplete="nickname" value="${esc(APP_STATE.draftNickname)}" placeholder="${esc(t('nickPlaceholder'))}" aria-invalid="${APP_STATE.nicknameErrorKey?'true':'false'}" ${APP_STATE.nicknameErrorKey?'aria-describedby="nicknameError"':''} ${APP_STATE.nicknameChecking?'disabled':''} />
-    ${APP_STATE.nicknameErrorKey?`<p id="nicknameError" role="alert" class="mt-2 text-xs font-semibold leading-5 break-words" style="color:#ff9b9b;">${esc(t(APP_STATE.nicknameErrorKey))}</p>`:''}
+    ${APP_STATE.nicknameErrorKey?`<p id="nicknameError" role="alert" class="mt-2 text-xs font-semibold leading-5 break-words" style="color:#ff9b9b;">${esc(t(APP_STATE.nicknameErrorKey))}${APP_STATE.nicknameErrorDetail?`<span class="block mt-1" style="color:#ffc5b5;">${esc(APP_STATE.nicknameErrorDetail)}</span>`:''}</p>`:''}
     <button class="primary-btn mt-7" data-action="saveProfile" ${APP_STATE.draftCountry&&!APP_STATE.nicknameChecking?'':'disabled'}>${APP_STATE.nicknameChecking?`${icon('search',17)}${t('nickChecking')}`:`${first?t('start'):t('saveChanges')}${icon('arrow')}`}</button>
     ${!first?`<button class="w-full text-center muted text-sm py-4 mt-1" data-action="cancelModal">${t('cancel')}</button>`:''}
   </div></div>`;
@@ -4013,21 +3866,67 @@ function completeLesson() {
   APP_STATE.flipped=false;renderAll();
   toast(earned?`${t('earned')} +${earned} ECO 🌱`:t('repeatDone'));
 }
-function speak(value,lang) {
-  if(!window.speechSynthesis || !window.SpeechSynthesisUtterance){toast(t('audioUnavailable'));return;}
+let currentAudio=null;
+let speakingSerial=0;
+let nativeUtterance=null;
+function speakFallback(value,lang,serial){
+  if(serial!==speakingSerial)return;
+  const engine=window.speechSynthesis;
+  if(!engine||typeof window.SpeechSynthesisUtterance!=='function'){
+    toast(t('audioUnavailable'));return;
+  }
   const locale=lang==='ko'?'ko-KR':'en-US';
-  try {
-    const engine=window.speechSynthesis;engine.cancel();
-    const item=new SpeechSynthesisUtterance(String(value));item.lang=locale;item.rate=lang==='ko'?.86:.9;
-    const voices=engine.getVoices();item.voice=voices.find(v=>v.lang.toLowerCase()===locale.toLowerCase()) || voices.find(v=>v.lang.toLowerCase().startsWith(lang+'-')) || null;
-    if(!item.voice && voices.length)toast(t('audioNoVoice'));
-    engine.speak(item);
-  }catch(error){console.info('Speech synthesis unavailable',error);toast(t('audioUnavailable'));}
+  const say=()=>{
+    if(serial!==speakingSerial)return;
+    try {
+      const voices=engine.getVoices();
+      const voice=voices.find(v=>v.lang?.toLowerCase()===locale.toLowerCase()) ||
+        voices.find(v=>v.lang?.toLowerCase().startsWith(lang+'-'));
+      // Never pronounce Korean with an unrelated default English voice.
+      if(!voice && voices.length){console.info('[NamuLab TTS] No matching local voice:',locale);toast(t('audioUnavailable'));return;}
+      const utterance=new SpeechSynthesisUtterance(value);
+      utterance.lang=locale;utterance.rate=lang==='ko'?.86:.9;utterance.voice=voice||null;
+      utterance.onerror=error=>{if(serial===speakingSerial){console.warn('[NamuLab TTS] Native synthesis failed:',error?.error||error);toast(t('audioUnavailable'));}};
+      nativeUtterance=utterance;engine.cancel();engine.speak(utterance);
+    }catch(error){console.warn('[NamuLab TTS] Native error:',error);toast(t('audioUnavailable'));}
+  };
+  if(!engine.getVoices().length){
+    let loaded=false;
+    const listener=()=>{if(loaded)return;loaded=true;engine.removeEventListener?.('voiceschanged',listener);say();};
+    engine.addEventListener?.('voiceschanged',listener,{once:true});
+    setTimeout(listener,450);
+  }else say();
+}
+function speak(value,lang){
+  if(!['en','ko'].includes(lang))return;
+  const text=String(value||'').trim();if(!text)return;
+  const serial=++speakingSerial;
+  try{currentAudio?.pause();if(currentAudio)currentAudio.src='';window.speechSynthesis?.cancel();}catch(error){}
+  currentAudio=null;nativeUtterance=null;
+  // Unofficial online TTS may throttle or be blocked; a native voice is the backup.
+  const url=`https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=${lang}&q=${encodeURIComponent(text.slice(0,180))}`;
+  let audio;
+  try{audio=new Audio(url);}catch(error){speakFallback(text,lang,serial);return;}
+  currentAudio=audio;
+  audio.preload='auto';
+  let settled=false;
+  const timer=setTimeout(()=>fail(new Error('Online TTS timed out')),6500);
+  function done(){if(settled)return;settled=true;clearTimeout(timer);}
+  function fail(error){
+    if(settled||serial!==speakingSerial)return;
+    done();
+    console.info('[NamuLab TTS] Online audio unavailable; trying native voice:',error?.message||error);
+    try{audio.pause();audio.removeAttribute('src');audio.load();}catch(e){}
+    speakFallback(text,lang,serial);
+  }
+  audio.addEventListener('playing',()=>done(),{once:true});
+  audio.addEventListener('error',()=>fail(new Error('Online audio fetch/playback error')),{once:true});
+  try{const play=audio.play();if(play&&typeof play.catch==='function')play.catch(fail);}catch(error){fail(error);}
 }
 function openEditProfile() {
   APP_STATE.nicknameCheckSerial++;
   APP_STATE.nicknameChecking=false;
-  APP_STATE.nicknameErrorKey=null;
+  APP_STATE.nicknameErrorKey=null;APP_STATE.nicknameErrorDetail=null;
   APP_STATE.draftCountry=APP_STATE.country;
   APP_STATE.draftNickname=APP_STATE.nickname;
   APP_STATE.modalMode='edit';renderAll();
@@ -4045,9 +3944,10 @@ function escapeIlikeLiteral(name) {
 function isReservedBotNickname(name) {
   return DEMO_PLAYERS.some(player=>normalizeNickname(player.name)===normalizeNickname(name));
 }
-function showNicknameError(key) {
+function showNicknameError(key,detail='') {
   APP_STATE.nicknameChecking=false;
   APP_STATE.nicknameErrorKey=key;
+  APP_STATE.nicknameErrorDetail=String(detail||'').slice(0,380)||null;
   renderAll();
 }
 async function waitForCloudWrite(signal) {
@@ -4064,10 +3964,10 @@ async function saveProfile() {
   const country=APP_STATE.draftCountry;
   if(!name || name.length>22) { showNicknameError('invalidName'); return; }
   APP_STATE.draftNickname=name;
-  APP_STATE.nicknameErrorKey=null;
+  APP_STATE.nicknameErrorKey=null;APP_STATE.nicknameErrorDetail=null;
   if(isReservedBotNickname(name)) { showNicknameError('nickTaken'); return; }
-  if(!SUPABASE_CLIENT || typeof navigator!=='undefined' && navigator.onLine===false) {
-    showNicknameError('nickUnavailable');return;
+  if(!sbClient || typeof navigator!=='undefined' && navigator.onLine===false) {
+    showNicknameError('nickUnavailable',!sbClient?'Supabase JS SDK was not initialized':'Browser is offline');return;
   }
   APP_STATE.nicknameChecking=true;
   const requestId=++APP_STATE.nicknameCheckSerial;
@@ -4083,13 +3983,13 @@ async function saveProfile() {
     if(!isCurrent())return;
     if(!cloudProfileChecked)throw new Error('Cloud profile is not available');
     guard=cloudDeadline();
-    const {data:otherUsers,error:checkError}=await SUPABASE_CLIENT.from('users')
+    const {data:otherUsers,error:checkError}=await sbClient.from('users')
       .select('user_id')
       .ilike('nickname',escapeIlikeLiteral(name))
       .neq('user_id',USER_ID)
       .limit(1)
       .abortSignal(guard.signal);
-    if(checkError)throw checkError;
+    if(checkError){reportCloudError('nickname SELECT ilike',checkError);throw checkError;}
     if(!isCurrent())return;
     if(otherUsers?.length){showNicknameError('nickTaken');return;}
 
@@ -4101,18 +4001,17 @@ async function saveProfile() {
     acquiredWriteLock=true;
     clearTimeout(cloudDebounceTimer);
     const data={...getPersistentState(),nickname:name,country};
-    const {error:saveError}=await SUPABASE_CLIENT.from('users').upsert({
+    await writeCloudProfile({
       user_id:USER_ID,nickname:name,country,
       eco:safeNumber(APP_STATE.eco),streak:safeNumber(effectiveStreak()),
       state_json:data,updated_at:new Date().toISOString()
-    },{onConflict:'user_id'}).abortSignal(guard.signal);
-    if(saveError)throw saveError;
+    },guard.signal);
     if(!isCurrent())return;
     APP_STATE.nickname=name;
     APP_STATE.country=country;
     APP_STATE.modalMode=null;
     APP_STATE.nicknameChecking=false;
-    APP_STATE.nicknameErrorKey=null;
+    APP_STATE.nicknameErrorKey=null;APP_STATE.nicknameErrorDetail=null;
     lastConfirmedNickname=name;
     localEditedAt=Date.now();
     localDirty=false;
@@ -4124,10 +4023,10 @@ async function saveProfile() {
     renderAll();toast(t('savedProfile'));haptic();
     if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
   }catch(error){
-    console.warn('Nickname verification/reservation failed',error);
+    reportCloudError('nickname verification / save',error);
     if(!isCurrent())return;
     const duplicate=String(error?.code||'')==='23505' || String(error?.code||'')==='23514' && isReservedBotNickname(name);
-    showNicknameError(duplicate?'nickTaken':'nickUnavailable');
+    showNicknameError(duplicate?'nickTaken':'nickUnavailable',duplicate?'':cloudErrorMessage(error));
   }finally{
     guard?.clear();
     if(acquiredWriteLock)cloudSaveInFlight=false;
@@ -4197,7 +4096,7 @@ function buildShareText() {
   const c=APP_STATE.country||'—';
   return `${t('shareTextTitle')} 🌿
 NamuLab • Bioengineering Exam Prep
-${COUNTRY_FLAGS[c]||'🌐'} ${escText(APP_STATE.nickname)} · ${c}
+${c} ${escText(APP_STATE.nickname)}
 ${getAchievementTitle()}
 🎓 ${t('shareReady')}: ${getExamReadiness()}%
 📚 ${t('shareLearned')}: ${APP_STATE.learnedIds.length}/${TERMS_DB.length}
@@ -4218,6 +4117,32 @@ function shareFitText(ctx,value,maxWidth,startSize,minSize=17) {
   if(ctx.measureText(output).width>maxWidth){while(output.length>1&&ctx.measureText(output+'…').width>maxWidth)output=output.slice(0,-1);output+='…';}
   return output;
 }
+function drawCanvasFlag(ctx,code,x,y,w,h) {
+  // Canvas flags are vector-drawn, so their rendering never depends on emoji fonts.
+  ctx.save();roundedPath(ctx,x,y,w,h,4);ctx.clip();
+  if(code==='KZ'){
+    ctx.fillStyle='#00AFC8';ctx.fillRect(x,y,w,h);
+    ctx.fillStyle='#F7CB42';ctx.fillRect(x+3,y,2,h);
+    ctx.beginPath();ctx.arc(x+w*.54,y+h*.42,h*.16,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='#F7CB42';ctx.lineWidth=1.2;
+    for(let i=0;i<8;i++){const a=i*Math.PI/4;ctx.beginPath();ctx.moveTo(x+w*.54+Math.cos(a)*h*.21,y+h*.42+Math.sin(a)*h*.21);ctx.lineTo(x+w*.54+Math.cos(a)*h*.28,y+h*.42+Math.sin(a)*h*.28);ctx.stroke();}
+    ctx.beginPath();ctx.moveTo(x+w*.26,y+h*.72);ctx.quadraticCurveTo(x+w*.5,y+h*.92,x+w*.8,y+h*.72);ctx.quadraticCurveTo(x+w*.53,y+h*.97,x+w*.26,y+h*.72);ctx.fill();
+  } else if(code==='KR'){
+    ctx.fillStyle='#fff';ctx.fillRect(x,y,w,h);
+    ctx.fillStyle='#CD2E3A';ctx.beginPath();ctx.arc(x+w/2,y+h/2,h*.26,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#0047A0';ctx.beginPath();ctx.arc(x+w/2,y+h/2,h*.26,0,Math.PI);ctx.fill();
+    ctx.strokeStyle='#111';ctx.lineWidth=1.5;
+    for(const [cx,cy,dir] of [[.18,.23,1],[.82,.77,1],[.82,.23,-1],[.18,.77,-1]]){
+      for(let j=-1;j<=1;j++){ctx.beginPath();ctx.moveTo(x+w*cx+j*2.5,y+h*cy-3*dir);ctx.lineTo(x+w*cx+j*2.5+5,y+h*cy+3*dir);ctx.stroke();}
+    }
+  } else if(code==='US'){
+    ctx.fillStyle='#fff';ctx.fillRect(x,y,w,h);ctx.fillStyle='#B22234';
+    for(let i=0;i<7;i++)ctx.fillRect(x,y+i*h/6.5,w,h/13);
+    ctx.fillStyle='#3C3B6E';ctx.fillRect(x,y,w*.42,h*.54);
+    ctx.fillStyle='#fff';for(let r=0;r<4;r++)for(let c=0;c<5;c++){ctx.beginPath();ctx.arc(x+3+c*w*.072,y+2+r*h*.115,.8,0,Math.PI*2);ctx.fill();}
+  } else{ctx.fillStyle='#184e39';ctx.fillRect(x,y,w,h);}
+  ctx.restore();
+}
 function createShareCard() {
   const canvas=document.createElement('canvas');
   const ratio=Math.max(2,window.devicePixelRatio||1);
@@ -4235,7 +4160,7 @@ function createShareCard() {
   ctx.fillStyle='#bfff87';ctx.font="800 17px 'Noto Sans KR', 'DM Sans', sans-serif";ctx.fillText('BIOLOGY  /  EXAM PREP',74,191);
   roundedPath(ctx,74,214,572,173,22);ctx.fillStyle='#ffffff0e';ctx.fill();ctx.strokeStyle='#b4f99a31';ctx.stroke();
   roundedPath(ctx,92,236,163,59,14);ctx.fillStyle='#174a38';ctx.fill();ctx.strokeStyle='#baff8350';ctx.stroke();
-  ctx.font='32px "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';ctx.fillStyle='#ffffff';ctx.fillText(COUNTRY_FLAGS[APP_STATE.country]||'🌍',106,277);
+  drawCanvasFlag(ctx,APP_STATE.country,106,250,43,30);
   ctx.font="800 22px 'Noto Sans KR', 'DM Sans',sans-serif";ctx.fillStyle='#bff48f';ctx.fillText(APP_STATE.country||'—',170,274);
   ctx.fillStyle='#f1fff1';ctx.fillText(shareFitText(ctx,APP_STATE.nickname||t('noName'),460,44,23),94,335);
   ctx.fillStyle='#9ccdb0';ctx.font="700 19px 'Noto Sans KR', 'DM Sans',sans-serif";ctx.fillText(getAchievementTitle(),94,369);
@@ -4327,6 +4252,59 @@ function sanitizeCloudPlayer(row){
   if(!id)return null;
   return {id,name:String(row.nickname||'').trim().slice(0,22)||'Explorer',country:validCountry(row.country),eco:safeNumber(row.eco),streak:safeNumber(row.streak)};
 }
+function cloudErrorMessage(error){
+  if(!error)return 'Unknown Supabase error';
+  const message=String(error.message||error.error_description||error||'Unknown error');
+  const code=error.code?` [${String(error.code)}]`:'';
+  return `${message}${code}`.slice(0,450);
+}
+function reportCloudError(stage,error,notify=false){
+  console.error(`[NamuLab Supabase: ${stage}] ${cloudErrorMessage(error)}`,{
+    code:error?.code,details:error?.details,hint:error?.hint,status:error?.status,error
+  });
+  if(notify)toast(`${t('cloudError')}: ${cloudErrorMessage(error)}`);
+}
+// Missing optional columns must not break signup or ECO. For a complete cloud
+// progress history, keep state_json in the public.users schema.
+const cloudOptionalColumns=new Set(['state_json','updated_at']);
+function cloudMissingColumn(error){
+  const code=String(error?.code||'');
+  const msg=String(error?.message||'');
+  if(!['PGRST204','42703'].includes(code)&&!/column.*(does not exist|schema cache|could not find)/i.test(msg))return null;
+  const matched=msg.match(/['"`]((?:state_json|updated_at))['"`]/i) || msg.match(/(?:users\.)?(state_json|updated_at)\b/i);
+  return matched?.[1]||null;
+}
+async function readCloudProfile(userId,signal){
+  for(let attempt=0;attempt<3;attempt++){
+    const fields=['user_id','nickname','country','eco','streak',...cloudOptionalColumns].join(',');
+    const result=await sbClient.from('users').select(fields).eq('user_id',userId).maybeSingle().abortSignal(signal);
+    if(!result.error)return result.data;
+    const missing=cloudMissingColumn(result.error);
+    reportCloudError('profile SELECT '+fields,result.error);
+    if(missing&&cloudOptionalColumns.has(missing)){cloudOptionalColumns.delete(missing);continue;}
+    throw result.error;
+  }
+  throw new Error('Optional Supabase columns could not be resolved');
+}
+async function writeCloudProfile(row,signal){
+  for(let attempt=0;attempt<3;attempt++){
+    const filtered={...row};
+    for(const col of ['state_json','updated_at'])if(!cloudOptionalColumns.has(col))delete filtered[col];
+    const {error}=await sbClient.from('users').upsert(filtered,{onConflict:'user_id'}).abortSignal(signal);
+    if(!error){
+      if(!cloudOptionalColumns.has('state_json')&&!window.__namulabSchemaNotified){
+        window.__namulabSchemaNotified=true;
+        toast(t('cloudSchemaMissing'));
+      }
+      return;
+    }
+    const missing=cloudMissingColumn(error);
+    reportCloudError('profile UPSERT',error);
+    if(missing&&cloudOptionalColumns.has(missing)){cloudOptionalColumns.delete(missing);continue;}
+    throw error;
+  }
+  throw new Error('Supabase profile UPSERT failed after schema compatibility checks');
+}
 function cloudDeadline(){
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(),CLOUD_READ_TIMEOUT_MS);
@@ -4384,13 +4362,13 @@ function installPersistedState(next,remoteTime,keepDirty=false){
   renderAll();
 }
 function scheduleCloudSave(){
-  if(!cloudBootstrapped || !cloudProfileChecked || !SUPABASE_CLIENT)return;
+  if(!cloudBootstrapped || !cloudProfileChecked || !sbClient)return;
   if(APP_STATE.nicknameChecking){pendingCloudWrite=true;return;}
   clearTimeout(cloudDebounceTimer);
   cloudDebounceTimer=setTimeout(()=>{void flushCloudSave();},500);
 }
 async function flushCloudSave(){
-  if(!SUPABASE_CLIENT || !cloudBootstrapped || !cloudProfileChecked || !localDirty || !APP_STATE.country || !APP_STATE.nickname)return;
+  if(!sbClient || !cloudBootstrapped || !cloudProfileChecked || !localDirty || !APP_STATE.country || !APP_STATE.nickname)return;
   if(APP_STATE.nicknameChecking){pendingCloudWrite=true;return;}
   if(cloudSaveInFlight){pendingCloudWrite=true;return;}
   if(typeof navigator!=='undefined' && navigator.onLine===false){setCloudStatus('offline');return;}
@@ -4405,9 +4383,7 @@ async function flushCloudSave(){
   };
   const guard=cloudDeadline();
   try {
-    const {error}=await SUPABASE_CLIENT.from('users')
-      .upsert(row,{onConflict:'user_id'}).abortSignal(guard.signal);
-    if(error)throw error;
+    await writeCloudProfile(row,guard.signal);
     lastConfirmedNickname=row.nickname;
     if(snapshot===JSON.stringify(getPersistentState())){
       localDirty=false;
@@ -4419,7 +4395,7 @@ async function flushCloudSave(){
     setCloudStatus('synced');
     if(APP_STATE.activeTab==='ranking')void refreshCloudRanking({silent:true});
   } catch(error){
-    console.warn('Supabase save failed; local progress preserved',error);
+    reportCloudError('autosave; local progress preserved',error,true);
     if(String(error?.code||'')==='23505'){
       // Delayed upserts must never silently swallow nickname collisions.
       const proposed=APP_STATE.nickname;
@@ -4439,16 +4415,13 @@ async function flushCloudSave(){
   }
 }
 async function initializeCloud(){
-  if(!SUPABASE_CLIENT){cloudBootstrapped=true;setCloudStatus('offline');return;}
+  if(!sbClient){cloudBootstrapped=true;setCloudStatus('offline');return;}
   const readAtStart=lastSavedSnapshot;
   cloudReadRevision++;
   const token=cloudReadRevision;
   const guard=cloudDeadline();
   try{
-    const {data:remote,error}=await SUPABASE_CLIENT.from('users')
-      .select('user_id,nickname,country,eco,streak,state_json,updated_at')
-      .eq('user_id',USER_ID).maybeSingle().abortSignal(guard.signal);
-    if(error)throw error;
+    const remote=await readCloudProfile(USER_ID,guard.signal);
     if(token!==cloudReadRevision)return;
     if(remote){
       lastConfirmedNickname=String(remote.nickname||'').trim();
@@ -4476,7 +4449,7 @@ async function initializeCloud(){
     cloudBootstrapped=true;
     if(!remote || localDirty)scheduleCloudSave();
   }catch(error){
-    console.warn('Supabase profile read failed',error);
+    reportCloudError('startup profile read',error,true);
     cloudBootstrapped=true;
     setCloudStatus(navigator.onLine===false?'offline':'error');
     // Wait for reconnection before attempting the initial upsert: do not
@@ -4495,7 +4468,7 @@ function startCloudInitialization(){
 async function fetchCountryTotals(signal){
   // Fast, scalable path if the optional SQL aggregation function exists.
   try {
-    const {data,error}=await SUPABASE_CLIENT.rpc('get_country_totals').abortSignal(signal);
+    const {data,error}=await sbClient.rpc('get_country_totals').abortSignal(signal);
     if(!error && Array.isArray(data)){
       const sums={KZ:0,KR:0,US:0};
       for(const item of data){const country=validCountry(item.country);if(country)sums[country]+=safeNumber(Number(item.total_eco ?? item.eco_total ?? item.eco));}
@@ -4506,7 +4479,7 @@ async function fetchCountryTotals(signal){
   // with country totals. For large communities, deploy the RPC above.
   const totals={KZ:0,KR:0,US:0};
   for(let start=0;start<100000;start+=CLOUD_PAGE_SIZE){
-    const {data,error}=await SUPABASE_CLIENT.from('users')
+    const {data,error}=await sbClient.from('users')
       .select('country,eco').range(start,start+CLOUD_PAGE_SIZE-1).abortSignal(signal);
     if(error)throw error;
     for(const item of data||[]){const country=validCountry(item.country);if(country)totals[country]+=safeNumber(item.eco);}
@@ -4515,7 +4488,7 @@ async function fetchCountryTotals(signal){
   throw new Error('Country totals require the get_country_totals RPC for a community of 100,000+ users');
 }
 async function refreshCloudRanking({silent=false}={}){
-  if(!SUPABASE_CLIENT){setCloudStatus('offline');if(!silent)toast(t('cloudNoServer'));return;}
+  if(!sbClient){setCloudStatus('offline');if(!silent)toast(t('cloudNoServer'));return;}
   if(APP_STATE.cloudRefreshing){cloudRefreshAgain=true;return;}
   const id=++cloudRankingRequest;
   APP_STATE.cloudRefreshing=true;
@@ -4524,10 +4497,10 @@ async function refreshCloudRanking({silent=false}={}){
   try {
     const order=APP_STATE.sortBy==='streak'?'streak':'eco';
     const [topResult,totals,selfResult]=await Promise.all([
-      SUPABASE_CLIENT.from('users').select('user_id,nickname,country,eco,streak')
+      sbClient.from('users').select('user_id,nickname,country,eco,streak')
         .order(order,{ascending:false}).limit(50).abortSignal(guard.signal),
       fetchCountryTotals(guard.signal),
-      SUPABASE_CLIENT.from('users').select('user_id,country,eco')
+      sbClient.from('users').select('user_id,country,eco')
         .eq('user_id',USER_ID).maybeSingle().abortSignal(guard.signal)
     ]);
     if(topResult.error)throw topResult.error;
@@ -4544,7 +4517,7 @@ async function refreshCloudRanking({silent=false}={}){
     renderAll();
     if(!silent)toast(t('cloudRefreshDone'));
   }catch(error){
-    console.warn('Could not refresh Supabase leaderboard',error);
+    reportCloudError('leaderboard / country totals',error,!silent);
     if(id===cloudRankingRequest){
       if(APP_STATE.cloudStatus!=='syncing')setCloudStatus(navigator.onLine===false?'offline':'error');
       if(!silent)toast(t('cloudRefreshFail'));
@@ -4556,64 +4529,43 @@ async function refreshCloudRanking({silent=false}={}){
 }
 
 // ================================================================
-// ANNOUNCEMENTS: public read from app_settings (id=1), no UI blocking.
-// ADMIN: privileged requests go through a verified Telegram Edge Function.
-// The publishable key and JavaScript PIN do NOT authorize modifications.
+// ANNOUNCEMENTS: public read from app_settings (id=1).
+// ADMIN: PIN opens the interface. All database requests use the publishable
+// Supabase client; PostgreSQL RLS still decides whether writes are allowed.
+// Never grant anonymous write privileges to make this interface "admin".
 // ================================================================
-let adminSessionPIN='';
 let announcementsRequest=0;
 async function loadPublicAnnouncement(){
-  if(!SUPABASE_CLIENT)return;
+  if(!sbClient)return;
   const reqId=++announcementsRequest;
+  const guard=cloudDeadline();
   try{
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),6000);
-    let response;
-    try{response=await SUPABASE_CLIENT.from('app_settings')
-      .select('id,announcement_text,is_active,updated_at')
-      .eq('id',1).maybeSingle().abortSignal(controller.signal);
-    }finally{clearTimeout(timer);}
+    const {data:row,error}=await sbClient.from('app_settings')
+      .select('id,announcement_text,is_active').eq('id',1).maybeSingle().abortSignal(guard.signal);
+    if(error)throw error;
     if(reqId!==announcementsRequest)return;
-    if(response.error)throw response.error;
-    const row=response.data;
     APP_STATE.announcement=row?{
       id:1,announcement_text:String(row.announcement_text||'').slice(0,1500),
-      is_active:row.is_active===true,updated_at:String(row.updated_at||'')
+      is_active:row.is_active===true,updated_at:String(row.announcement_text||'')
     }:null;
     renderAll();
-  }catch(error){
-    console.info('Announcement unavailable; learning continues',error?.message||error);
-  }
+  }catch(error){reportCloudError('announcement SELECT',error,false);}
+  finally{guard.clear();}
 }
 function dismissAnnouncement(){
   APP_STATE.announcementDismissedKey=announcementKey(APP_STATE.announcement);
   renderAll();haptic();
 }
-function adminFailKey(error){
-  const status=Number(error?.context?.status||error?.status||0);
-  if(status===401||status===403)return 'adminForbidden';
-  if(status===404)return 'adminNoServer';
-  const msg=String(error?.message||error||'').toLowerCase();
-  if(/telegram|identity|not owner|forbidden|unauthorized|403|401/.test(msg))return 'adminForbidden';
-  if(/404|function|fetch|network|failed to send/.test(msg))return 'adminNoServer';
-  return 'adminError';
-}
-async function callAdminGateway(action,payload={}){
-  if(!SUPABASE_CLIENT)throw Error('Function unavailable: Supabase SDK');
-  if(!telegram?.initData)throw Error('Telegram signed identity required');
-  const {data,error}=await SUPABASE_CLIENT.functions.invoke(ADMIN_FUNCTION_NAME,{
-    body:{action,pin:adminSessionPIN||APP_STATE.adminPINInput,initData:telegram.initData,...payload}
-  });
-  if(error)throw error;
-  if(!data||data.ok!==true)throw Error(data?.error||'Function returned an invalid response');
-  return data;
+function adminFailure(error){
+  APP_STATE.adminErrorKey='adminError';
+  APP_STATE.adminErrorDetail=cloudErrorMessage(error);
+  reportCloudError('admin direct database action (check RLS / GRANT)',error,true);
 }
 function openAdmin(){
   if(!isAdminEntryVisible())return;
   APP_STATE.adminVerified=false;
-  adminSessionPIN='';
   APP_STATE.adminPINInput='';APP_STATE.adminPINErrorKey=null;
-  APP_STATE.adminErrorKey=null;
+  APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;
   APP_STATE.modalMode='admin-pin';renderAll();haptic();
 }
 async function verifyAdmin(){
@@ -4621,26 +4573,16 @@ async function verifyAdmin(){
   if(APP_STATE.adminPINInput!==ADMIN_PIN){
     APP_STATE.adminPINErrorKey='adminPINWrong';renderAll();return;
   }
-  APP_STATE.adminPINBusy=true;APP_STATE.adminPINErrorKey=null;renderAll();
-  try{
-    adminSessionPIN=APP_STATE.adminPINInput;
-    const result=await callAdminGateway('verify');
-    APP_STATE.adminVerified=true;
-    APP_STATE.adminPINInput='';
-    APP_STATE.adminTotalPlayers=safeNumber(result.totalUsers);
-    APP_STATE.adminNoticeText=APP_STATE.announcement?.announcement_text||'';
-    APP_STATE.adminNoticeActive=Boolean(APP_STATE.announcement?.is_active);
-    APP_STATE.adminTab='overview';APP_STATE.modalMode='admin';
-    renderAll();
-    void loadAdminPlayers();
-  }catch(error){
-    adminSessionPIN='';
-    APP_STATE.adminPINErrorKey=adminFailKey(error);
-    renderAll();
-  }finally{APP_STATE.adminPINBusy=false;renderAll();}
+  APP_STATE.adminVerified=true;
+  APP_STATE.adminPINInput='';APP_STATE.adminPINErrorKey=null;
+  APP_STATE.adminNoticeText=APP_STATE.announcement?.announcement_text||'';
+  APP_STATE.adminNoticeActive=Boolean(APP_STATE.announcement?.is_active);
+  APP_STATE.adminTab='overview';APP_STATE.modalMode='admin';
+  APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;
+  renderAll();haptic();
+  void loadAdminPlayers();
 }
 function closeAdmin(){
-  adminSessionPIN='';
   APP_STATE.adminVerified=false;APP_STATE.adminPINInput='';
   APP_STATE.adminPINErrorKey=null;APP_STATE.adminConfirm=null;
   APP_STATE.modalMode=null;renderAll();
@@ -4653,48 +4595,57 @@ function sanitizeAdminRows(rows){
 }
 async function loadAdminPlayers(){
   if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
-  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  if(!sbClient){adminFailure(new Error('Supabase JS SDK unavailable'));renderAll();return;}
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
+  const guard=cloudDeadline();
   try{
-    const response=await callAdminGateway('list_players',{
-      offset:APP_STATE.adminPage*APP_STATE.adminPageSize,limit:APP_STATE.adminPageSize
-    });
-    APP_STATE.adminPlayers=sanitizeAdminRows(response.players);
-    APP_STATE.adminTotalPlayers=safeNumber(response.total);
+    const {data,count,error}=await sbClient.from('users')
+      .select('user_id,nickname,country,eco,streak',{count:'exact'})
+      .order('eco',{ascending:false})
+      .range(APP_STATE.adminPage*APP_STATE.adminPageSize,(APP_STATE.adminPage+1)*APP_STATE.adminPageSize-1)
+      .abortSignal(guard.signal);
+    if(error)throw error;
+    APP_STATE.adminPlayers=sanitizeAdminRows(data);
+    APP_STATE.adminTotalPlayers=safeNumber(count||0);
     APP_STATE.adminLastUpdated=Date.now();
-  }catch(error){
-    console.warn('Admin list failed',error);
-    APP_STATE.adminErrorKey=adminFailKey(error);
-  }finally{APP_STATE.adminBusy=false;renderAll();}
+  }catch(error){adminFailure(error);}
+  finally{guard.clear();APP_STATE.adminBusy=false;renderAll();}
 }
 function chooseAdminTab(tab){
   if(!APP_STATE.adminVerified||!['overview','announcement','players'].includes(tab))return;
-  APP_STATE.adminTab=tab;APP_STATE.adminErrorKey=null;APP_STATE.adminConfirm=null;
+  APP_STATE.adminTab=tab;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;APP_STATE.adminConfirm=null;
   renderAll();
   if(tab==='players'&&!APP_STATE.adminLastUpdated)void loadAdminPlayers();
 }
 async function publishAdminAnnouncement(){
   if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
   const text=String(APP_STATE.adminNoticeText||'').trim().slice(0,1500);
-  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  const active=Boolean(APP_STATE.adminNoticeActive)&&text.length>0;
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
+  const guard=cloudDeadline();
   try{
-    const response=await callAdminGateway('set_announcement',{
-      announcement_text:text,is_active:Boolean(APP_STATE.adminNoticeActive)
-    });
-    const showBanner=Boolean(APP_STATE.adminNoticeActive)&&text.length>0;
-    APP_STATE.adminNoticeActive=showBanner;
-    APP_STATE.announcement={id:1,announcement_text:text,
-      is_active:showBanner,updated_at:response.updated_at||new Date().toISOString()};
+    if(!sbClient)throw new Error('Supabase JS SDK unavailable');
+    // UPDATE avoids needing INSERT permission if app_settings row id=1 exists.
+    // A successful UPDATE with zero visible rows usually means the RLS policy denies it.
+    const {data,error}=await sbClient.from('app_settings')
+      .update({announcement_text:text,is_active:active})
+      .eq('id',1).select('id,announcement_text,is_active').maybeSingle()
+      .abortSignal(guard.signal);
+    if(error)throw error;
+    if(!data)throw new Error('app_settings id=1 not found or UPDATE blocked by RLS/GRANT');
+    APP_STATE.adminNoticeActive=active;
+    APP_STATE.announcement={id:1,announcement_text:text,is_active:active,updated_at:text};
     APP_STATE.announcementDismissedKey=null;
     toast(t('adminPublished'));
-  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
-  finally{APP_STATE.adminBusy=false;renderAll();}
+  }catch(error){adminFailure(error);}
+  finally{guard.clear();APP_STATE.adminBusy=false;renderAll();}
 }
 function selectAdminEco(userId){
   const p=APP_STATE.adminPlayers.find(row=>row.id===userId);
   if(!p||!APP_STATE.adminVerified)return;
   APP_STATE.adminEditUserId=userId;
   APP_STATE.adminEcoInput=String(p.eco);
-  APP_STATE.adminConfirm=null;APP_STATE.adminErrorKey=null;renderAll();
+  APP_STATE.adminConfirm=null;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
 }
 async function saveAdminEco(){
   if(!APP_STATE.adminVerified||APP_STATE.adminBusy)return;
@@ -4702,29 +4653,49 @@ async function saveAdminEco(){
   if(!Number.isSafeInteger(value)||value<0||value>1000000000){APP_STATE.adminErrorKey='adminError';renderAll();return;}
   const userId=APP_STATE.adminEditUserId;
   if(!APP_STATE.adminPlayers.some(row=>row.id===userId))return;
-  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
+  const guard=cloudDeadline();
   try{
-    await callAdminGateway('set_eco',{user_id:userId,eco:value});
+    if(!sbClient)throw new Error('Supabase JS SDK unavailable');
+    // These direct mutations require an owner-restricted RLS policy.
+    const {data,error}=await sbClient.from('users').update({eco:value})
+      .eq('user_id',userId).select('user_id').maybeSingle().abortSignal(guard.signal);
+    if(error)throw error;
+    if(!data)throw new Error('User ECO UPDATE was denied by RLS or the user does not exist');
     APP_STATE.adminEditUserId=null;
-    toast(t('adminSaved'));
+    if(userId===USER_ID)APP_STATE.eco=value;
     APP_STATE.adminPlayers=APP_STATE.adminPlayers.map(p=>p.id===userId?{...p,eco:value}:p);
-    await refreshCloudRanking({silent:true});
-  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
-  finally{APP_STATE.adminBusy=false;renderAll();}
+    toast(t('adminSaved'));
+    void refreshCloudRanking({silent:true});
+  }catch(error){adminFailure(error);}
+  finally{guard.clear();APP_STATE.adminBusy=false;renderAll();}
 }
 function askAdminConfirm(kind,userId){
   if(!APP_STATE.adminVerified||!['reset','delete'].includes(kind))return;
   const p=APP_STATE.adminPlayers.find(row=>row.id===userId);
   if(!p)return;
   APP_STATE.adminConfirm={kind,id:p.id,name:p.name};
-  APP_STATE.adminEditUserId=null;APP_STATE.adminErrorKey=null;renderAll();
+  APP_STATE.adminEditUserId=null;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
 }
 async function executeAdminConfirm(){
   const task=APP_STATE.adminConfirm;
   if(!APP_STATE.adminVerified||APP_STATE.adminBusy||!task)return;
-  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;renderAll();
+  APP_STATE.adminBusy=true;APP_STATE.adminErrorKey=null;APP_STATE.adminErrorDetail=null;renderAll();
+  const guard=cloudDeadline();
   try{
-    await callAdminGateway(task.kind==='delete'?'delete_user':'reset_nick',{user_id:task.id});
+    if(!sbClient)throw new Error('Supabase JS SDK unavailable');
+    let data,error;
+    if(task.kind==='delete'){
+      ({data,error}=await sbClient.from('users').delete()
+        .eq('user_id',task.id).select('user_id').maybeSingle().abortSignal(guard.signal));
+    }else{
+      const random=typeof crypto?.randomUUID==='function'?crypto.randomUUID().replace(/-/g,'').slice(0,14):Math.random().toString(36).slice(2,16);
+      const guestName='Guest_'+random;
+      ({data,error}=await sbClient.from('users').update({nickname:guestName})
+        .eq('user_id',task.id).select('user_id').maybeSingle().abortSignal(guard.signal));
+    }
+    if(error)throw error;
+    if(!data)throw new Error('Player mutation blocked by RLS/GRANT or user not found');
     APP_STATE.adminConfirm=null;
     toast(t('adminSaved'));
     if(task.kind==='delete'){
@@ -4732,10 +4703,10 @@ async function executeAdminConfirm(){
       APP_STATE.adminTotalPlayers=Math.max(0,APP_STATE.adminTotalPlayers-1);
     }
     APP_STATE.adminBusy=false;
-    await loadAdminPlayers();
+    void loadAdminPlayers();
     void refreshCloudRanking({silent:true});
-  }catch(error){APP_STATE.adminErrorKey=adminFailKey(error);}
-  finally{APP_STATE.adminBusy=false;renderAll();}
+  }catch(error){adminFailure(error);}
+  finally{guard.clear();APP_STATE.adminBusy=false;renderAll();}
 }
 
 function handleAction(action,element) {
@@ -4786,7 +4757,7 @@ document.addEventListener('input',event=>{
   if(event.target?.id==='nicknameInput'){
     APP_STATE.draftNickname=event.target.value;
     if(APP_STATE.nicknameErrorKey){
-      APP_STATE.nicknameErrorKey=null;
+      APP_STATE.nicknameErrorKey=null;APP_STATE.nicknameErrorDetail=null;
       document.getElementById('nicknameError')?.remove();
       event.target.setAttribute('aria-invalid','false');
     }
@@ -4820,7 +4791,7 @@ document.addEventListener('click',event=>{
     const input=document.getElementById('nicknameInput');if(input)APP_STATE.draftNickname=input.value;
     if(APP_STATE.nicknameChecking)return;
     APP_STATE.draftCountry=button.dataset.country;
-    APP_STATE.nicknameErrorKey=null;
+    APP_STATE.nicknameErrorKey=null;APP_STATE.nicknameErrorDetail=null;
     renderAll();return;
   }
   if(button.dataset.tab){switchTab(button.dataset.tab);return;}
